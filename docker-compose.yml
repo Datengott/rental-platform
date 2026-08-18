@@ -1,0 +1,72 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rental_dev
+      POSTGRES_PASSWORD: rental_dev_password
+      POSTGRES_DB: rental_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rental_dev -d rental_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: development
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://rental_dev:rental_dev_password@postgres:5432/rental_platform
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./prisma:/app/prisma
+      - /app/apps/api/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: npm run start:dev --workspace=apps/api
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      target: development
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://rental_dev:rental_dev_password@postgres:5432/rental_platform
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./apps/worker:/app/apps/worker
+      - ./prisma:/app/prisma
+      - /app/apps/worker/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: npm run start:dev --workspace=apps/worker
+    # This is what runs the rent-expiry reminder scheduler, payment reconciliation job,
+    # and notification dispatch queue — see schema doc Section B.7 for the job logic.
+
+volumes:
+  postgres_data:

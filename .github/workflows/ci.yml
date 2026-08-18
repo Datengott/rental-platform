@@ -1,0 +1,54 @@
+# Matches the pipeline described in deployment-infrastructure-and-module-schemas.md
+# Section A.6. Extend the deploy job once GCP project/service account secrets exist —
+# left as a manual step for now so this is usable from day one without cloud access.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: rental_test
+          POSTGRES_PASSWORD: rental_test_password
+          POSTGRES_DB: rental_platform_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://rental_test:rental_test_password@localhost:5432/rental_platform_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run test:e2e
+
+  build-image:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: docker build -f apps/api/Dockerfile --target production -t rental-api:${{ github.sha }} .
+      - name: Build worker image
+        run: docker build -f apps/worker/Dockerfile --target production -t rental-worker:${{ github.sha }} .
+      # TODO once GCP is wired up: push to Artifact Registry, deploy to Cloud Run.
+      # See deployment-infrastructure-and-module-schemas.md Section A.6 for the intended flow.

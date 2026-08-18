@@ -1,0 +1,23 @@
+{
+  "name": "@rental-platform/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Background jobs: rent-expiry reminder scheduler, payment reconciliation, notification dispatch queue",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "start:dev": "ts-node-dev --respawn src/main.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.18.0",
+    "node-cron": "^3.0.3",
+    "bullmq": "^5.12.0",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/node-cron": "^3.0.11",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.0"
+  }
+}

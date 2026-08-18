@@ -1,0 +1,185 @@
+// This schema is seeded with the Auth (B.1) and Property/Listings (B.2) modules fully
+// modeled, matching the SQL DDL in docs/deployment-infrastructure-and-module-schemas.md
+// EXACTLY (field names, types, constraints). Extend it module-by-module in the build
+// order specified in CLAUDE.md — copy this pattern (add the model, add the enum if
+// needed, run `npm run prisma:migrate`) rather than inventing a different structure.
+//
+// IMPORTANT: field names here must match the DDL in the docs verbatim. If you need to
+// deviate, update the docs first — they are the source of truth, not this file.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// B.1 — Auth & Identity Module
+// ============================================================
+
+enum KycTier {
+  unverified
+  id_verified
+  ownership_verified
+}
+
+enum UserRole {
+  landlord
+  tenant
+  admin
+  support_agent
+}
+
+model User {
+  id               String    @id @default(uuid())
+  phoneNumber      String    @unique @map("phone_number")
+  fullName         String?   @map("full_name")
+  locale           String    @default("fr") // 'fr' | 'en'
+  idDocumentType   String?   @map("id_document_type")
+  idDocumentRef    String?   @map("id_document_ref")
+  idDocumentUrl    String?   @map("id_document_url")
+  kycTier          KycTier   @default(unverified) @map("kyc_tier")
+  kycVerifiedAt    DateTime? @map("kyc_verified_at")
+  kycVerifiedBy    String?   @map("kyc_verified_by")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deactivatedAt    DateTime? @map("deactivated_at")
+
+  roles            UserRoleAssignment[]
+  sessions         Session[]
+
+  @@map("users")
+}
+
+model UserRoleAssignment {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  role      UserRole
+  grantedAt DateTime @default(now()) @map("granted_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+  @@map("user_roles")
+}
+
+model OtpChallenge {
+  id          String    @id @default(uuid())
+  phoneNumber String    @map("phone_number")
+  otpHash     String    @map("otp_hash")
+  purpose     String    // 'login' | 'signup' | 'sensitive_action'
+  expiresAt   DateTime  @map("expires_at")
+  attempts    Int       @default(0)
+  consumedAt  DateTime? @map("consumed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([phoneNumber])
+  @@map("otp_challenges")
+}
+
+model Session {
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  refreshTokenHash  String    @map("refresh_token_hash")
+  deviceInfo        Json?     @map("device_info")
+  issuedAt          DateTime  @default(now()) @map("issued_at")
+  expiresAt         DateTime  @map("expires_at")
+  revokedAt         DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ============================================================
+// B.2 — Property & Listings Module
+// ============================================================
+
+model Property {
+  id                     String    @id @default(uuid())
+  landlordId             String    @map("landlord_id") // references users.id — NOT a Prisma relation
+                                                          // across modules, per the cross-module rule in
+                                                          // CLAUDE.md. Look up landlord details via the
+                                                          // Auth module's service, not a Prisma join.
+  name                   String?
+  addressLine            String    @map("address_line")
+  city                   String
+  region                 String?
+  latitude               Decimal?  @db.Decimal(9, 6)
+  longitude              Decimal?  @db.Decimal(9, 6)
+  ownershipDocUrl        String?   @map("ownership_doc_url")
+  ownershipVerifiedAt    DateTime? @map("ownership_verified_at")
+  ownershipVerifiedBy    String?   @map("ownership_verified_by")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  units Unit[]
+
+  @@map("properties")
+}
+
+enum UnitStatus {
+  draft
+  vacant
+  visit_requested
+  reserved
+  occupied
+  notice_given
+}
+
+enum BillingCycle {
+  monthly
+  quarterly
+  biannual
+}
+
+model Unit {
+  id           String       @id @default(uuid())
+  propertyId   String       @map("property_id")
+  label        String?
+  bedrooms     Int?
+  bathrooms    Int?
+  sizeSqm      Decimal?     @db.Decimal(8, 2) @map("size_sqm")
+  rentAmount   Decimal      @db.Decimal(12, 0) @map("rent_amount")
+  currency     String       @default("XAF")
+  billingCycle BillingCycle @default(monthly) @map("billing_cycle")
+  status       UnitStatus   @default(draft)
+  description  String?
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  property Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  photos   UnitPhoto[]
+
+  @@index([status])
+  @@index([propertyId])
+  @@map("units")
+}
+
+model UnitPhoto {
+  id           String    @id @default(uuid())
+  unitId       String    @map("unit_id")
+  storageUrl   String    @map("storage_url")
+  geoLatitude  Decimal?  @db.Decimal(9, 6) @map("geo_latitude")
+  geoLongitude Decimal?  @db.Decimal(9, 6) @map("geo_longitude")
+  capturedAt   DateTime? @map("captured_at")
+  sortOrder    Int       @default(0) @map("sort_order")
+  uploadedAt   DateTime  @default(now()) @map("uploaded_at")
+
+  unit Unit @relation(fields: [unitId], references: [id], onDelete: Cascade)
+
+  @@map("unit_photos")
+}
+
+// ============================================================
+// Remaining modules (visits, tenancies, payments, contracts,
+// notifications, complaints, admin) — add here following this
+// exact pattern, in the build order specified in CLAUDE.md.
+// Full DDL for all of them is in:
+//   docs/deployment-infrastructure-and-module-schemas.md
+//   docs/notification-module-multichannel.md (notifications supersedes
+//   the single-channel version in the schema doc — use that one)
+// ============================================================
