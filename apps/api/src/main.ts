@@ -11,4 +11,4 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`API listening on port ${port}`);
 }
-bootstrap();
+void bootstrap();

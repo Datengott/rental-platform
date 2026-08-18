@@ -67,7 +67,7 @@ local dev (Postgres + Redis + api + worker), and the Auth/Properties portion of 
 Prisma schema. No module business logic has landed yet.
 
 ## Prerequisites
-- Node.js 20+
+- Node.js 24+
 - Docker + Docker Compose
 - Git
 

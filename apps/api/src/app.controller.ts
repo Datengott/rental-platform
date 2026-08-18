@@ -27,7 +27,7 @@ export class AppController {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
       result.database = 'ok';
-    } catch (err) {
+    } catch {
       result.database = 'unreachable';
       result.status = 'degraded';
     }
@@ -35,7 +35,7 @@ export class AppController {
     try {
       await this.redis.ping();
       result.redis = 'ok';
-    } catch (err) {
+    } catch {
       result.redis = 'unreachable';
       result.status = 'degraded';
     }
