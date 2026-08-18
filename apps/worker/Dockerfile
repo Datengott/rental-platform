@@ -25,7 +25,6 @@ WORKDIR /app
 RUN apk add --no-cache openssl
 ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/apps/worker/node_modules ./apps/worker/node_modules
 COPY --from=build /app/apps/worker/dist ./apps/worker/dist
 COPY --from=build /app/prisma ./prisma
 CMD ["node", "apps/worker/dist/main.js"]
