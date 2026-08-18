@@ -6,6 +6,7 @@
     "apps/worker"
   ],
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "docker compose up",
     "dev:build": "docker compose up --build",
     "prisma:generate": "prisma generate",
@@ -16,7 +17,8 @@
     "test:e2e": "npm run test:e2e --workspaces --if-present"
   },
   "devDependencies": {
-    "prisma": "^5.18.0",
-    "typescript": "^5.5.0"
+    "dotenv": "^17.4.2",
+    "prisma": "^7.9.1",
+    "typescript": "^6.0.3"
   }
 }

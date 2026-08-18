@@ -1,8 +1,10 @@
+import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import cron from 'node-cron';
 
-const prisma = new PrismaClient();
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+const prisma = new PrismaClient({ adapter });
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
 async function verifyConnections() {

@@ -1,7 +1,7 @@
 # Runs the background jobs: rent-expiry reminder scheduler (schema doc Section B.7),
 # payment reconciliation (API spec Section 7), notification dispatch queue.
 
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 WORKDIR /app
 RUN apk add --no-cache openssl
 COPY package*.json ./
@@ -20,7 +20,7 @@ COPY apps/worker ./apps/worker
 RUN npx prisma generate
 RUN npm run build --workspace=apps/worker
 
-FROM node:20-alpine AS production
+FROM node:24-alpine AS production
 WORKDIR /app
 RUN apk add --no-cache openssl
 ENV NODE_ENV=production

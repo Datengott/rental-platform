@@ -67,7 +67,7 @@ local dev (Postgres + Redis + api + worker), and the Auth/Properties portion of 
 Prisma schema. No module business logic has landed yet.
 
 ## Prerequisites
-- Node.js 20+
+- Node.js 24+
 - Docker + Docker Compose
 - Git
 
@@ -165,5 +165,4 @@ written against them (tracked in `docs/PRD-mvp.md` and `CLAUDE.md`):
 
 - Exact statutory notice-period defaults per region (placeholder of 90 days in the
   schema, pending lawyer confirmation)
-- Whether e-signature needs "advanced tier" under Cameroon's cybersecurity law
 - Final choice between CamPay and Monetbil as payment aggregator

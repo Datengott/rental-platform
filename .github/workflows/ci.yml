@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: rental_test
           POSTGRES_PASSWORD: rental_test_password
@@ -29,12 +29,13 @@ jobs:
     env:
       DATABASE_URL: postgresql://rental_test:rental_test_password@localhost:5432/rental_platform_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
       - run: npm ci
+      - run: npx prisma generate
       - run: npx prisma migrate deploy
       - run: npm run lint
       - run: npm run test
@@ -45,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build API image
         run: docker build -f apps/api/Dockerfile --target production -t rental-api:${{ github.sha }} .
       - name: Build worker image
