@@ -1,4 +1,5 @@
 import { Controller, Get, Injectable } from '@nestjs/common';
+import { ApiExcludeController } from '@nestjs/swagger';
 import { PrismaService } from './common/prisma.service';
 import Redis from 'ioredis';
 
@@ -10,6 +11,7 @@ class RedisHealthClient {
   }
 }
 
+@ApiExcludeController() // infra probe, not part of the API contract — see docs/api-specification.md
 @Controller()
 export class AppController {
   private redis = new RedisHealthClient();

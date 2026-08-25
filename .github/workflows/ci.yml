@@ -28,6 +28,11 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://rental_test:rental_test_password@localhost:5432/rental_platform_test
+      JWT_ACCESS_TOKEN_SECRET: ci-only-access-secret
+      JWT_ACCESS_TOKEN_TTL_SECONDS: "3600"
+      JWT_REFRESH_TOKEN_SECRET: ci-only-refresh-secret
+      OTP_TTL_SECONDS: "300"
+      OTP_MAX_ATTEMPTS: "3"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

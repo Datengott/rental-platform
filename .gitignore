@@ -6,4 +6,5 @@ dist/
 coverage/
 .nest/
 *.tsbuildinfo
+uploads/
 CLAUDE.md

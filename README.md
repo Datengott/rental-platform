@@ -47,8 +47,12 @@ event names.
 Build proceeds one module at a time, in dependency order. Checked = implemented and
 tested; unchecked = not started or schema-only.
 
-- [ ] **Auth** — phone+OTP, roles, KYC tier (`User`, `UserRoleAssignment`, `OtpChallenge`,
-      `Session` modeled in `prisma/schema.prisma`; endpoints not yet implemented)
+- [x] **Auth** — phone+OTP, roles, KYC tier: OTP request/verify, JWT access + opaque
+      refresh tokens, `/users/me` profile, KYC document upload, admin KYC approval.
+      Covered by `apps/api/src/modules/auth/auth.service.spec.ts` (mocked, fast) and
+      `apps/api/test/auth.e2e-spec.ts` (real Postgres). SMS delivery and object storage
+      are dev-only stubs (console log / local disk) behind swappable interfaces —
+      real Africa's Talking / R2 wiring is still pending credentials.
 - [ ] **Properties** — listings, units, photos (`Property`, `Unit`, `UnitPhoto` modeled;
       endpoints not yet implemented)
 - [ ] **Visits** — visit requests
@@ -63,8 +67,10 @@ tested; unchecked = not started or schema-only.
 
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
 worker process that verifies its DB/Redis connections on startup, Docker Compose for
-local dev (Postgres + Redis + api + worker), and the Auth/Properties portion of the
-Prisma schema. No module business logic has landed yet.
+local dev (Postgres + Redis + api + worker), the Auth/Properties portion of the Prisma
+schema, and the Auth module fully implemented per `docs/api-specification.md` Section 3.
+Interactive API docs (Swagger UI, generated from the same controllers/DTOs) are served
+at `/docs` in dev.
 
 ## Prerequisites
 - Node.js 24+
@@ -99,7 +105,8 @@ docker compose up
 ```
 
 The API will be available at `http://localhost:3000`. Confirm `/health` responds, then
-start implementing modules in the order below.
+open `http://localhost:3000/docs` for interactive Swagger docs — use the "Authorize"
+button with an access token from `/v1/auth/otp/verify` to try protected endpoints.
 
 ### Alpine/Prisma note
 
@@ -131,9 +138,14 @@ it to a fresh clone if you're picking up this repo on another machine.
 
 ## Running tests
 ```bash
-npm run test          # unit tests, both apps
-npm run test:e2e      # end-to-end tests (needs postgres running)
+npm run test          # unit tests — mocked, no DB, sub-second
+npm run test:e2e      # real HTTP + real Postgres, no mocking of the thing under test
 ```
+
+`test:e2e` needs `DATABASE_URL` plus the `JWT_*`/`OTP_*` vars from `.env.example` set in
+the shell (or already in `.env`, which docker-compose picks up but a bare `npm run`
+from the host won't) — see the `env:` block in `.github/workflows/ci.yml` for the exact
+set CI uses against its ephemeral Postgres.
 
 CI (`.github/workflows/ci.yml`) runs lint, unit tests, and e2e tests against a Postgres
 service container on every push/PR to `main`, then builds the production Docker images

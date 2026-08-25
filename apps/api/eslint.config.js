@@ -8,7 +8,12 @@ module.exports = tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        // tsconfig.spec.json extends tsconfig.json and only adds things
+        // spec files need (jest globals, a broader rootDir) — using it for
+        // everything avoids TS6's stricter automatic @types inclusion
+        // silently dropping ambient jest/multer types depending on which
+        // config eslint happens to resolve for a given file.
+        project: './tsconfig.spec.json',
         tsconfigRootDir: __dirname,
       },
     },
