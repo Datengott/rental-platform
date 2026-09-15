@@ -8,7 +8,6 @@ import { UsersService } from './users.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from './guards/roles.guard';
 import { ConsoleSmsGateway, SMS_GATEWAY } from './sms/sms-gateway';
-import { LocalDiskObjectStorage, OBJECT_STORAGE } from './storage/object-storage';
 
 @Module({
   imports: [JwtModule.register({})], // secret/expiry passed explicitly per sign/verify call
@@ -19,7 +18,10 @@ import { LocalDiskObjectStorage, OBJECT_STORAGE } from './storage/object-storage
     JwtAuthGuard,
     RolesGuard,
     { provide: SMS_GATEWAY, useClass: ConsoleSmsGateway },
-    { provide: OBJECT_STORAGE, useClass: LocalDiskObjectStorage },
   ],
+  // Other modules need these to guard their own routes and to call Auth's
+  // public interface (e.g. Properties granting the landlord role) — per
+  // CLAUDE.md, through this service, never through Auth's Prisma models.
+  exports: [JwtModule, JwtAuthGuard, RolesGuard, UsersService],
 })
 export class AuthModule {}

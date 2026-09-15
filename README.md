@@ -53,8 +53,13 @@ tested; unchecked = not started or schema-only.
       `apps/api/test/auth.e2e-spec.ts` (real Postgres). SMS delivery and object storage
       are dev-only stubs (console log / local disk) behind swappable interfaces —
       real Africa's Talking / R2 wiring is still pending credentials.
-- [ ] **Properties** — listings, units, photos (`Property`, `Unit`, `UnitPhoto` modeled;
-      endpoints not yet implemented)
+- [x] **Properties** — create property (auto-grants the landlord role — there's no
+      separate "become a landlord" flow in the spec), units, geo-tagged photo upload
+      (first photo moves a unit `draft → vacant`, per PRD Epic 2 US-2.1 AC2), public
+      search, landlord's own inventory, and a manual `vacant ↔ reserved` status
+      transition (everything else is system-driven, pending Visits/Tenancies).
+      Covered by `properties.service.spec.ts`/`units.service.spec.ts` (mocked) and
+      `apps/api/test/properties.e2e-spec.ts` (real Postgres).
 - [ ] **Visits** — visit requests
 - [ ] **Tenancies** — occupancy, termination notices (statutory notice-period floor
       pending legal sign-off — see `docs/PRD-mvp.md` Epic 4)
@@ -67,10 +72,9 @@ tested; unchecked = not started or schema-only.
 
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
 worker process that verifies its DB/Redis connections on startup, Docker Compose for
-local dev (Postgres + Redis + api + worker), the Auth/Properties portion of the Prisma
-schema, and the Auth module fully implemented per `docs/api-specification.md` Section 3.
-Interactive API docs (Swagger UI, generated from the same controllers/DTOs) are served
-at `/docs` in dev.
+local dev (Postgres + Redis + api + worker), and the Auth and Properties modules fully
+implemented per `docs/api-specification.md` Sections 3–4. Interactive API docs (Swagger
+UI, generated from the same controllers/DTOs) are served at `/docs` in dev.
 
 ## Prerequisites
 - Node.js 24+
@@ -162,7 +166,7 @@ apps/
   api/           NestJS application — one module folder per bounded module
   worker/        Background jobs: rent-expiry scheduler, payment reconciliation, notification dispatch
 prisma/
-  schema.prisma  Database schema — Auth + Properties modules modeled so far
+  schema.prisma  Database schema — Auth + Properties modules modeled and implemented
 docs/            Full product/technical specification (PRD, API spec, architecture, schemas)
 .github/workflows/
   ci.yml         Lint, test, build on every push/PR to main

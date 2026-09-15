@@ -1,15 +1,18 @@
 import { HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { UserRole } from '@prisma/client';
 import { PrismaService } from '../../common/prisma.service';
 import { ApiException } from '../../common/exceptions/api.exception';
 import {
   USER_KYC_TIER_CHANGED,
+  USER_ROLE_GRANTED,
   UserKycTierChangedEvent,
+  UserRoleGrantedEvent,
 } from '../../common/events/user.events';
+import { OBJECT_STORAGE, ObjectStorage } from '../../common/storage/object-storage';
 import { UpdateMeDto } from './dto/update-me.dto';
 import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
 import { ApproveKycDto } from './dto/approve-kyc.dto';
-import { OBJECT_STORAGE, ObjectStorage } from './storage/object-storage';
 
 @Injectable()
 export class UsersService {
@@ -43,7 +46,7 @@ export class UsersService {
       ]);
     }
 
-    const url = await this.objectStorage.upload(file.buffer, file.originalname);
+    const url = await this.objectStorage.upload('kyc-documents', file.buffer, file.originalname);
 
     await this.prisma.user.update({
       where: { id: userId },
@@ -83,6 +86,21 @@ export class UsersService {
     } satisfies UserKycTierChangedEvent);
 
     return this.toProfile(updated);
+  }
+
+  // Called by other modules through this public interface (never via a
+  // direct Prisma write to Auth's tables — see CLAUDE.md's cross-module
+  // rule). There's no dedicated "become a landlord" flow in the API spec;
+  // per docs/api-specification.md Section 4, creating a property is what
+  // makes a user a landlord, so Properties calls this on first success.
+  async ensureRole(userId: string, role: UserRole): Promise<void> {
+    const existing = await this.prisma.userRoleAssignment.findUnique({
+      where: { userId_role: { userId, role } },
+    });
+    if (existing) return;
+
+    await this.prisma.userRoleAssignment.create({ data: { userId, role } });
+    this.events.emit(USER_ROLE_GRANTED, { userId, role } satisfies UserRoleGrantedEvent);
   }
 
   private toProfile(user: {

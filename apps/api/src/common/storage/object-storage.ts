@@ -6,23 +6,24 @@ import { Injectable } from '@nestjs/common';
 // R2 credentials are still blank in .env.example (see CLAUDE.md's "flag it
 // to the human" list is about payments/notices/e-signature, but bucket
 // wiring is equally unset — flagging here rather than guessing credentials).
-// This dev-only implementation writes to local disk so the upload flow is
+// This dev-only implementation writes to local disk so upload flows are
 // testable end-to-end; swap for a real R2 client once credentials exist.
 // Callers only depend on the interface below, so nothing else changes.
 export interface ObjectStorage {
-  upload(buffer: Buffer, originalName: string): Promise<string>;
+  upload(folder: string, buffer: Buffer, originalName: string): Promise<string>;
 }
 
-const LOCAL_UPLOAD_DIR = join(process.cwd(), 'uploads', 'kyc-documents');
+const LOCAL_UPLOAD_ROOT = join(process.cwd(), 'uploads');
 
 @Injectable()
 export class LocalDiskObjectStorage implements ObjectStorage {
-  async upload(buffer: Buffer, originalName: string): Promise<string> {
-    await mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
+  async upload(folder: string, buffer: Buffer, originalName: string): Promise<string> {
+    const dir = join(LOCAL_UPLOAD_ROOT, folder);
+    await mkdir(dir, { recursive: true });
     const extension = originalName.includes('.') ? originalName.split('.').pop() : 'bin';
     const fileName = `${randomUUID()}.${extension}`;
-    await writeFile(join(LOCAL_UPLOAD_DIR, fileName), buffer);
-    return `local://kyc-documents/${fileName}`;
+    await writeFile(join(dir, fileName), buffer);
+    return `local://${folder}/${fileName}`;
   }
 }
 

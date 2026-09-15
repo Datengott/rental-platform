@@ -4,32 +4,13 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { PrismaModule } from '../src/common/prisma.module';
+import { StorageModule } from '../src/common/storage/storage.module';
 import { AuthModule } from '../src/modules/auth/auth.module';
 import { configureApp } from '../src/setup-app';
 import { PrismaService } from '../src/common/prisma.service';
-import { SMS_GATEWAY, SmsGateway } from '../src/modules/auth/sms/sms-gateway';
-
-// Captures whatever the auth flow "sends" instead of hitting a real SMS
-// provider, so tests can read back the OTP without scraping console logs.
-class FakeSmsGateway implements SmsGateway {
-  public lastMessage: string | undefined;
-
-  async send(_phoneNumber: string, message: string): Promise<void> {
-    this.lastMessage = message;
-    return Promise.resolve();
-  }
-
-  extractOtp(): string {
-    const match = this.lastMessage?.match(/(\d{6})/);
-    if (!match) throw new Error('No OTP captured — did requestOtp run first?');
-    return match[1];
-  }
-}
-
-function randomPhoneNumber(): string {
-  const suffix = Math.floor(100000 + Math.random() * 899999);
-  return `+2376${suffix}`;
-}
+import { SMS_GATEWAY } from '../src/modules/auth/sms/sms-gateway';
+import { FakeSmsGateway, randomPhoneNumber } from './support/fake-sms-gateway';
+import { signUp as signUpViaHttp } from './support/sign-up';
 
 describe('Auth module (e2e)', () => {
   let app: INestApplication;
@@ -43,7 +24,13 @@ describe('Auth module (e2e)', () => {
     // (which also boots AppController's live Redis health-check client,
     // unrelated to anything under test here and a needless slowdown).
     const moduleRef = await Test.createTestingModule({
-      imports: [ConfigModule.forRoot({ isGlobal: true }), EventEmitterModule.forRoot(), PrismaModule, AuthModule],
+      imports: [
+        ConfigModule.forRoot({ isGlobal: true }),
+        EventEmitterModule.forRoot(),
+        PrismaModule,
+        StorageModule,
+        AuthModule,
+      ],
     })
       .overrideProvider(SMS_GATEWAY)
       .useValue(fakeSms)
@@ -60,25 +47,8 @@ describe('Auth module (e2e)', () => {
     await app.close();
   });
 
-  async function signUp(phoneNumber: string) {
-    const requestRes = await request(app.getHttpServer())
-      .post('/v1/auth/otp/request')
-      .send({ phone_number: phoneNumber, purpose: 'signup' })
-      .expect(200);
-
-    const otp = fakeSms.extractOtp();
-
-    const verifyRes = await request(app.getHttpServer())
-      .post('/v1/auth/otp/verify')
-      .send({ challenge_id: requestRes.body.challenge_id, otp })
-      .expect(200);
-
-    return verifyRes.body as {
-      access_token: string;
-      refresh_token: string;
-      expires_in: number;
-      user: { id: string; phone_number: string; roles: string[]; kyc_tier: string };
-    };
+  function signUp(phoneNumber: string) {
+    return signUpViaHttp(app, fakeSms, phoneNumber);
   }
 
   afterEach(async () => {
