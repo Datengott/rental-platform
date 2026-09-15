@@ -21,6 +21,27 @@ cron.schedule('0 7 * * *', async () => {
   console.log('[worker] rent_expiry_reminder_scan would run now (not yet implemented).');
 });
 
+// Visits module (Section B.3) — PRD Epic 3 US-3.1 AC2: a pending visit
+// request auto-expires 48h after creation. The api's VisitsService also
+// lazy-expires on the single-record path it touches (respond()), so
+// correctness never depends on this sweep's interval — this just catches
+// requests nobody ever acted on.
+//
+// "the tenant is notified" (same AC) isn't implemented: this process has no
+// event bus shared with the api (EventEmitter2 is in-process only), and the
+// Notifications module doesn't exist yet. Once it does, this should publish
+// visit_request.expired for each row — via an outbox table or Redis pub/sub,
+// not a direct HTTP call back into the api.
+cron.schedule('*/15 * * * *', async () => {
+  const { count } = await prisma.visitRequest.updateMany({
+    where: { status: 'pending', expiresAt: { lt: new Date() } },
+    data: { status: 'expired' },
+  });
+  if (count > 0) {
+    console.log(`[worker] visit_request_expiry_sweep: expired ${count} request(s).`);
+  }
+});
+
 async function main() {
   await verifyConnections();
   console.log('[worker] Started. Waiting for scheduled jobs...');

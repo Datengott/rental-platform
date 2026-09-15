@@ -174,7 +174,44 @@ model UnitPhoto {
 }
 
 // ============================================================
-// Remaining modules (visits, tenancies, payments, contracts,
+// B.3 — Visit Requests Module
+// ============================================================
+
+enum VisitRequestStatus {
+  pending
+  accepted
+  declined
+  rescheduled
+  expired
+  completed
+}
+
+model VisitRequest {
+  id             String              @id @default(uuid())
+  unitId         String              @map("unit_id") // references units.id — NOT a Prisma relation
+                                                        // across modules, per CLAUDE.md. Look up the unit
+                                                        // via the Properties module's service.
+  tenantId       String              @map("tenant_id") // references users.id — same rule.
+  landlordId     String              @map("landlord_id") // denormalized for fast landlord-side queries.
+  requestedSlots Json?               @map("requested_slots")
+  status         VisitRequestStatus  @default(pending)
+  confirmedSlot  DateTime?           @map("confirmed_slot")
+  landlordNote   String?             @map("landlord_note")
+  expiresAt      DateTime            @map("expires_at")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  // The schema doc's idx_visit_expiry is a PARTIAL index (WHERE status =
+  // 'pending'), which Prisma's schema DSL can't express — plain index on
+  // the same column instead; the worker's expiry sweep still filters on
+  // status in its WHERE clause, so correctness doesn't depend on this.
+  @@index([landlordId, status])
+  @@index([expiresAt])
+  @@map("visit_requests")
+}
+
+// ============================================================
+// Remaining modules (tenancies, payments, contracts,
 // notifications, complaints, admin) — add here following this
 // exact pattern, in the build order specified in CLAUDE.md.
 // Full DDL for all of them is in:

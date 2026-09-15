@@ -60,7 +60,17 @@ tested; unchecked = not started or schema-only.
       transition (everything else is system-driven, pending Visits/Tenancies).
       Covered by `properties.service.spec.ts`/`units.service.spec.ts` (mocked) and
       `apps/api/test/properties.e2e-spec.ts` (real Postgres).
-- [ ] **Visits** — visit requests
+- [x] **Visits** — tenant requests a visit (+48h expiry), landlord accepts/declines/
+      proposes an alternate time, landlord inbox with status filtering. Expiry is
+      enforced twice: lazily on the single-record respond path (so cron lag can never
+      let a stale request be actioned) and by a periodic sweep in `apps/worker`.
+      The spec has no follow-up endpoint for a tenant to respond to a "rescheduled"
+      counter-proposal, and the DDL has no separate column for it — the landlord's
+      proposed time is stored in `confirmed_slot`, disambiguated by `status`.
+      "Tenant is notified" on expiry (PRD Epic 3 US-3.1 AC2) isn't implemented — no
+      event bus is shared between the worker and api processes, and Notifications
+      doesn't exist yet. Covered by `visits.service.spec.ts` (mocked) and
+      `apps/api/test/visits.e2e-spec.ts` (real Postgres).
 - [ ] **Tenancies** — occupancy, termination notices (statutory notice-period floor
       pending legal sign-off — see `docs/PRD-mvp.md` Epic 4)
 - [ ] **Payments** — ledger (append-only), mobile money integration — highest
@@ -71,10 +81,11 @@ tested; unchecked = not started or schema-only.
 - [ ] **Admin** — thin wrappers over other modules' APIs + audit log
 
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
-worker process that verifies its DB/Redis connections on startup, Docker Compose for
-local dev (Postgres + Redis + api + worker), and the Auth and Properties modules fully
-implemented per `docs/api-specification.md` Sections 3–4. Interactive API docs (Swagger
-UI, generated from the same controllers/DTOs) are served at `/docs` in dev.
+worker process that verifies its DB/Redis connections on startup (plus a real 15-minute
+visit-request expiry sweep), Docker Compose for local dev (Postgres + Redis + api +
+worker), and the Auth, Properties, and Visits modules fully implemented per
+`docs/api-specification.md` Sections 3–5. Interactive API docs (Swagger UI, generated
+from the same controllers/DTOs) are served at `/docs` in dev.
 
 ## Prerequisites
 - Node.js 24+
@@ -166,7 +177,7 @@ apps/
   api/           NestJS application — one module folder per bounded module
   worker/        Background jobs: rent-expiry scheduler, payment reconciliation, notification dispatch
 prisma/
-  schema.prisma  Database schema — Auth + Properties modules modeled and implemented
+  schema.prisma  Database schema — Auth, Properties, Visits modules modeled and implemented
 docs/            Full product/technical specification (PRD, API spec, architecture, schemas)
 .github/workflows/
   ci.yml         Lint, test, build on every push/PR to main

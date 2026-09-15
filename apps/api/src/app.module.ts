@@ -6,8 +6,9 @@ import { PrismaModule } from './common/prisma.module';
 import { StorageModule } from './common/storage/storage.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { PropertiesModule } from './modules/properties/properties.module';
+import { VisitsModule } from './modules/visits/visits.module';
 
-// Remaining feature modules (visits, tenancies, payments, contracts,
+// Remaining feature modules (tenancies, payments, contracts,
 // notifications, complaints, admin) get imported here as they're built,
 // following the order in CLAUDE.md.
 
@@ -19,7 +20,8 @@ import { PropertiesModule } from './modules/properties/properties.module';
     StorageModule,
     AuthModule,
     PropertiesModule,
-    // VisitsModule, TenanciesModule, PaymentsModule,
+    VisitsModule,
+    // TenanciesModule, PaymentsModule,
     // ContractsModule, NotificationsModule, ComplaintsModule, AdminModule — add here
   ],
   controllers: [AppController],

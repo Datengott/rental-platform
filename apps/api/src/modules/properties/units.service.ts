@@ -184,4 +184,17 @@ export class UnitsService {
     return unit;
   }
 
+  // Public interface for other modules (Visits needs to know who owns a
+  // unit to denormalize landlord_id onto a visit request) — never a direct
+  // Prisma import of Properties' models, per CLAUDE.md's cross-module rule.
+  async getUnitOwnership(unitId: string): Promise<{ id: string; propertyId: string; landlordId: string }> {
+    const unit = await this.prisma.unit.findUnique({
+      where: { id: unitId },
+      select: { id: true, propertyId: true, property: { select: { landlordId: true } } },
+    });
+    if (!unit) {
+      throw new NotFoundException('Unit not found');
+    }
+    return { id: unit.id, propertyId: unit.propertyId, landlordId: unit.property.landlordId };
+  }
 }

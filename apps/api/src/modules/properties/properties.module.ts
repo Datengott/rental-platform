@@ -12,5 +12,9 @@ import { UnitsService } from './units.service';
   imports: [AuthModule],
   controllers: [PropertiesController, UnitsController],
   providers: [PropertiesService, UnitsService],
+  // Visits needs UnitsService.getUnitOwnership() to denormalize landlord_id
+  // onto a visit request — through this public interface, never Properties'
+  // Prisma models directly.
+  exports: [UnitsService],
 })
 export class PropertiesModule {}
