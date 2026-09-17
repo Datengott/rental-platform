@@ -204,4 +204,18 @@ export class UnitsService {
     }
     return { id: unit.id, propertyId: unit.propertyId, landlordId: unit.property.landlordId, status: unit.status };
   }
+
+  // Public interface for Contracts, which needs the unit/property address
+  // to render into the generated lease document — never a direct Prisma
+  // read of Properties' models, per CLAUDE.md's cross-module rule.
+  async getContractDetails(unitId: string): Promise<{ label: string | null; addressLine: string; city: string }> {
+    const unit = await this.prisma.unit.findUnique({
+      where: { id: unitId },
+      select: { label: true, property: { select: { addressLine: true, city: true } } },
+    });
+    if (!unit) {
+      throw new NotFoundException('Unit not found');
+    }
+    return { label: unit.label, addressLine: unit.property.addressLine, city: unit.property.city };
+  }
 }

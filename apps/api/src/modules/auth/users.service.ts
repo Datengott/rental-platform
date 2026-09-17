@@ -111,6 +111,22 @@ export class UsersService {
     return user !== null;
   }
 
+  // Public interface for other modules that need a user's display details
+  // for generated documents (e.g. Contracts naming the landlord/tenant)
+  // without a direct Prisma read of Auth's tables, per CLAUDE.md's
+  // cross-module rule. Deliberately narrower than getMe()'s full profile —
+  // no KYC/role data leaks to a party who is merely named in a document.
+  async getPublicProfile(userId: string): Promise<{ id: string; fullName: string | null; phoneNumber: string; locale: string }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, fullName: true, phoneNumber: true, locale: true },
+    });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    return { id: user.id, fullName: user.fullName, phoneNumber: user.phoneNumber, locale: user.locale };
+  }
+
   private toProfile(user: {
     id: string;
     fullName: string | null;

@@ -14,6 +14,8 @@ describe('TenanciesService', () => {
   let usersService: { exists: jest.Mock };
   let events: { emit: jest.Mock; emitAsync: jest.Mock };
   let objectStorage: { upload: jest.Mock };
+  let paymentsService: { getCurrentBalance: jest.Mock; getRecentLedgerEntries: jest.Mock };
+  let contractsService: { getLatestStatusForTenancy: jest.Mock };
   let service: TenanciesService;
 
   beforeEach(() => {
@@ -22,12 +24,16 @@ describe('TenanciesService', () => {
     usersService = { exists: jest.fn() };
     events = { emit: jest.fn(), emitAsync: jest.fn().mockResolvedValue([]) };
     objectStorage = { upload: jest.fn().mockResolvedValue('local://termination-notices/x.txt') };
+    paymentsService = { getCurrentBalance: jest.fn().mockResolvedValue(0), getRecentLedgerEntries: jest.fn().mockResolvedValue([]) };
+    contractsService = { getLatestStatusForTenancy: jest.fn().mockResolvedValue(null) };
     service = new TenanciesService(
       prisma as never,
       units as never,
       usersService as never,
       events as never,
       objectStorage,
+      paymentsService as never,
+      contractsService as never,
     );
   });
 
@@ -171,6 +177,41 @@ describe('TenanciesService', () => {
         expect.objectContaining({ tenancyId: 'tenancy-1' }),
       );
       expect(result.document_url).toBe('local://termination-notices/x.txt');
+    });
+  });
+
+  describe('getById', () => {
+    it("surfaces the tenancy's most recently generated contract status", async () => {
+      prisma.tenancy.findUnique.mockResolvedValue({
+        id: 'tenancy-1',
+        landlordId: 'landlord-1',
+        tenantId: 'tenant-1',
+        unitId: 'unit-1',
+        startDate: new Date('2026-09-01'),
+        rentAmount: '150000',
+        currency: 'XAF',
+        billingCycle: 'monthly',
+        noticePeriodDays: 90,
+        maxAdvanceMonths: 3,
+        paidThroughDate: null,
+        reminderFirstDaysBefore: 30,
+        reminderSecondDaysBefore: 14,
+        status: 'active',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      contractsService.getLatestStatusForTenancy.mockResolvedValue('draft');
+
+      const result = await service.getById('landlord-1', 'tenancy-1');
+
+      expect(contractsService.getLatestStatusForTenancy).toHaveBeenCalledWith('tenancy-1');
+      expect(result.contract_status).toBe('draft');
+    });
+
+    it("rejects a requester who is neither the landlord nor the tenant", async () => {
+      prisma.tenancy.findUnique.mockResolvedValue({ id: 'tenancy-1', landlordId: 'landlord-1', tenantId: 'tenant-1' });
+
+      await expect(service.getById('stranger-1', 'tenancy-1')).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 

@@ -358,10 +358,42 @@ model PaymentWebhookRaw {
 }
 
 // ============================================================
-// Remaining modules (contracts,
-// notifications, complaints, admin) — add here following this
-// exact pattern, in the build order specified in CLAUDE.md.
-// Full DDL for all of them is in:
+// B.6 — Contract Generation & e-Signature Module
+// ============================================================
+
+enum ContractStatus {
+  draft
+  pending_signatures
+  fully_signed
+  voided
+}
+
+// contract_signatures from the schema doc's B.6 DDL is deliberately NOT
+// modeled here: e-signature (Epic 6 AC2/AC3, POST /contracts/{id}/sign) is
+// deferred pending the "basic vs. advanced tier" legal question flagged in
+// CLAUDE.md — see the Resolved decisions entry (2026-09-17). A signatures
+// table with no code path that ever writes to it would just be dead
+// schema; add it when that flow is actually built. A contract created
+// today therefore stays `draft` forever — there's no transition to
+// `pending_signatures`/`fully_signed` yet.
+model Contract {
+  id              String         @id @default(uuid())
+  tenancyId       String         @map("tenancy_id") // references tenancies.id — NOT a Prisma
+                                                        // relation across modules, per CLAUDE.md.
+  templateVersion String         @map("template_version")
+  locale          String // 'fr' | 'en'
+  documentUrl     String         @map("document_url")
+  status          ContractStatus @default(draft)
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  @@index([tenancyId])
+  @@map("contracts")
+}
+
+// ============================================================
+// Remaining modules (notifications, complaints, admin) — add here
+// following this exact pattern, in the build order specified in
+// CLAUDE.md. Full DDL for all of them is in:
 //   docs/deployment-infrastructure-and-module-schemas.md
 //   docs/notification-module-multichannel.md (notifications supersedes
 //   the single-channel version in the schema doc — use that one)

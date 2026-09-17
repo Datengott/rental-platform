@@ -10,10 +10,10 @@ import { PropertiesModule } from './modules/properties/properties.module';
 import { VisitsModule } from './modules/visits/visits.module';
 import { TenanciesModule } from './modules/tenancies/tenancies.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { ContractsModule } from './modules/contracts/contracts.module';
 
-// Remaining feature modules (contracts,
-// notifications, complaints, admin) get imported here as they're built,
-// following the order in CLAUDE.md.
+// Remaining feature modules (notifications, complaints, admin) get
+// imported here as they're built, following the order in CLAUDE.md.
 
 @Module({
   imports: [
@@ -27,7 +27,8 @@ import { PaymentsModule } from './modules/payments/payments.module';
     VisitsModule,
     TenanciesModule,
     PaymentsModule,
-    // ContractsModule, NotificationsModule, ComplaintsModule, AdminModule — add here
+    ContractsModule,
+    // NotificationsModule, ComplaintsModule, AdminModule — add here
   ],
   controllers: [AppController],
 })

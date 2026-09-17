@@ -17,6 +17,7 @@ import { OBJECT_STORAGE, ObjectStorage } from '../../common/storage/object-stora
 import { UnitsService } from '../properties/units.service';
 import { UsersService } from '../auth/users.service';
 import { PaymentsService } from '../payments/payments.service';
+import { ContractsService } from '../contracts/contracts.service';
 import { CreateTenancyDto } from './dto/create-tenancy.dto';
 import { UpdateReminderSettingsDto } from './dto/update-reminder-settings.dto';
 import { CreateTerminationNoticeDto } from './dto/create-termination-notice.dto';
@@ -43,6 +44,7 @@ export class TenanciesService {
     // a genuine bidirectional read between two closely-related bounded
     // contexts, not a layering mistake. NestJS's documented pattern for it.
     @Inject(forwardRef(() => PaymentsService)) private readonly paymentsService: PaymentsService,
+    @Inject(forwardRef(() => ContractsService)) private readonly contractsService: ContractsService,
   ) {}
 
   async createTenancy(landlordId: string, dto: CreateTenancyDto) {
@@ -118,16 +120,16 @@ export class TenanciesService {
 
   async getById(requesterId: string, tenancyId: string) {
     const tenancy = await this.getAccessibleTenancy(requesterId, tenancyId);
-    const [currentBalance, recentEntries] = await Promise.all([
+    const [currentBalance, recentEntries, contractStatus] = await Promise.all([
       this.paymentsService.getCurrentBalance(tenancyId),
       this.paymentsService.getRecentLedgerEntries(tenancyId, 5),
+      this.contractsService.getLatestStatusForTenancy(tenancyId),
     ]);
     return {
       ...this.toResponse(tenancy),
       current_balance: currentBalance,
       recent_ledger_entries: recentEntries,
-      // Contracts (#6) doesn't exist yet.
-      contract_status: null,
+      contract_status: contractStatus,
     };
   }
 
@@ -158,6 +160,16 @@ export class TenanciesService {
       maxAdvanceMonths: tenancy.maxAdvanceMonths,
       activeNoticeEffectiveDate: activeNotice?.effectiveDate ?? null,
     };
+  }
+
+  // Public interface for Contracts (through this, never a direct read of
+  // Tenancies' Prisma models, per CLAUDE.md). Reuses the same access check
+  // as getById() — api-specification.md Section 8 doesn't mark
+  // POST /tenancies/{id}/contracts "(landlord)", so either party may
+  // trigger generation, same as viewing the tenancy itself.
+  async getContractContext(requesterId: string, tenancyId: string) {
+    const tenancy = await this.getAccessibleTenancy(requesterId, tenancyId);
+    return this.toResponse(tenancy);
   }
 
   // payment.confirmed -> recompute paid_through_date, per schema doc B.4's

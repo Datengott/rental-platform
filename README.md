@@ -116,7 +116,23 @@ tested; unchecked = not started or schema-only.
       `payments.service.spec.ts` (mocked) and `apps/api/test/payments.e2e-spec.ts`
       (real Postgres, including a real signed webhook round-trip and the
       reconciliation sweep).
-- [ ] **Contracts** — generation + e-signature (tier decision pending)
+- [x] **Contracts** — document generation only. `POST /tenancies/{id}/contracts`
+      generates a single-locale lease document (FR or EN, defaulting to the
+      requester's own stored locale) from the tenancy/unit/party data, accessible
+      by either the landlord or the tenant; `GET /contracts/{id}` re-fetches it.
+      **E-signature (PRD Epic 6 AC2/AC3) is deliberately not built** — by explicit
+      direction, matching the same demo-first choice as Payments' simulated
+      aggregator. The still-open "basic vs. advanced e-signature tier" question
+      (Cameroon's cybersecurity law) is what has to be answered before
+      `POST /contracts/{id}/sign` can be built at all, so a contract stays in
+      `draft` status forever for now — there's no code path to
+      `pending_signatures`/`fully_signed`, and the `contract_signatures` table from
+      the schema doc wasn't created (it would be dead schema with no writer).
+      Tenancies' own `GET /tenancies/{id}` surfaces the tenancy's most recent
+      contract's status via a genuine bidirectional read wired with `forwardRef()`,
+      same pattern as the Tenancies↔Payments dependency. Covered by
+      `contracts.service.spec.ts` (mocked) and `apps/api/test/contracts.e2e-spec.ts`
+      (real Postgres).
 - [ ] **Notifications** — multi-channel routing incl. rent-expiry reminder scheduler
 - [ ] **Complaints**
 - [ ] **Admin** — thin wrappers over other modules' APIs + audit log
@@ -236,3 +252,7 @@ These need a human call before the corresponding real integration is built (trac
 - Final choice between CamPay and Monetbil as payment aggregator — the Payments module
   itself is fully built and demoable behind a simulated gateway (see above) per explicit
   direction, so this no longer blocks the module; it blocks swapping in the real one.
+- Whether e-signature needs to be "advanced tier" per Cameroon's cybersecurity law — the
+  Contracts module's document *generation* is fully built (see above) per explicit
+  direction, so this no longer blocks that; it blocks building `POST /contracts/{id}/sign`
+  at all, which doesn't exist yet.
