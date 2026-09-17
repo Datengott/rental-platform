@@ -25,6 +25,8 @@ export interface NotificationContext {
   effectiveDate?: string;
   reason?: string;
   visitAction?: string;
+  complaintCategory?: string;
+  complaintStatus?: string;
 }
 
 export interface RenderedContent {
@@ -101,6 +103,16 @@ export function renderNotificationContent(
       return locale === 'fr'
         ? { body: `Votre demande de visite pour ${unit} a été mise à jour : ${context.visitAction}.` }
         : { body: `Your visit request for ${unit} was updated: ${context.visitAction}.` };
+
+    case 'complaint.created':
+      return locale === 'fr'
+        ? { body: `Nouvelle réclamation (${context.complaintCategory}) pour ${unit} de la part de ${tenant}.` }
+        : { body: `New complaint (${context.complaintCategory}) for ${unit} from ${tenant}.` };
+
+    case 'complaint.status_changed':
+      return locale === 'fr'
+        ? { body: `Le statut de votre réclamation pour ${unit} est maintenant : ${context.complaintStatus}.` }
+        : { body: `Your complaint for ${unit} is now: ${context.complaintStatus}.` };
 
     default:
       return locale === 'fr' ? { body: 'Vous avez une nouvelle notification.' } : { body: 'You have a new notification.' };

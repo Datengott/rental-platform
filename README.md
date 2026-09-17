@@ -191,7 +191,33 @@ tested; unchecked = not started or schema-only.
       Covered by `notifications.service.spec.ts` (mocked, 15 cases) and
       `apps/api/test/notifications.e2e-spec.ts` (real Postgres, including the
       reminder scheduler's idempotency and a real webhook status-update round-trip).
-- [ ] **Complaints**
+- [x] **Complaints** — tenant files a complaint on their own tenancy (category +
+      description + up to 10 photo/video attachments via `multipart/form-data`),
+      landlord gets a filterable aggregate view (`unit_id`/`status`/`category`) and
+      updates status with an optional note (audit-logged in `complaint_updates`,
+      never overwritten). `acknowledged_at`/`resolved_at` are stamped once, the
+      first time each is reached — a status that bounces back and forth doesn't
+      re-stamp an already-recorded milestone. A `closed` complaint is terminal
+      (`422 COMPLAINT_ALREADY_CLOSED` on any further update).
+
+      Two notification-routing gaps are resolved rather than left open:
+      `complaint.created` has no entry in the multichannel doc's own routing
+      table (an apparent oversight, since it predates this module existing) —
+      routed by analogy to the identical `visit_request.created` shape (waterfall
+      push → whatsapp → sms to the landlord), since PRD Epic 7 US-7.1 AC2
+      explicitly requires the landlord be notified. `complaint.status_changed`
+      *is* documented (in-app + push to the tenant) and wired as specified.
+      There's no tenant-facing `GET /complaints` endpoint in api-specification.md
+      Section 10 — "tenant sees status updates" (AC2) is satisfied via that
+      in-app notification instead, not a dedicated detail endpoint.
+
+      A real ordering bug the e2e tests caught: media files were validated
+      *after* the Complaint row was already created, so an unsupported file
+      type left an orphaned complaint with no media — fixed by classifying every
+      file's type before creating anything. Covered by `complaints.service.spec.ts`
+      (mocked) and `apps/api/test/complaints.e2e-spec.ts` (real Postgres,
+      including the fan-out to the landlord and the status-change notification
+      to the tenant).
 - [ ] **Admin** — thin wrappers over other modules' APIs + audit log
 
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a

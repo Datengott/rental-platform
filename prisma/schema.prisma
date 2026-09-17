@@ -513,7 +513,83 @@ model NotificationPreference {
 }
 
 // ============================================================
-// Remaining modules (complaints, admin) — add here following this
-// exact pattern, in the build order specified in CLAUDE.md. Full DDL
-// for all of them is in docs/deployment-infrastructure-and-module-schemas.md
+// B.8 — Complaints & Maintenance Module
+// ============================================================
+
+enum ComplaintCategory {
+  plumbing
+  electrical
+  security
+  noise
+  other
+}
+
+enum ComplaintStatus {
+  open
+  acknowledged
+  in_progress
+  resolved
+  closed
+}
+
+enum ComplaintMediaType {
+  photo
+  video
+}
+
+model Complaint {
+  id          String            @id @default(uuid())
+  tenancyId   String            @map("tenancy_id") // references tenancies.id — NOT a Prisma
+                                                       // relation across modules, per CLAUDE.md.
+  unitId      String            @map("unit_id") // denormalized for the landlord's per-unit
+                                                    // aggregate view (PRD Epic 7 US-7.2) — same rule.
+  tenantId    String            @map("tenant_id") // references users.id — same rule.
+  landlordId  String            @map("landlord_id") // same rule.
+  category    ComplaintCategory
+  description String
+  status      ComplaintStatus   @default(open)
+  createdAt   DateTime          @default(now()) @map("created_at")
+  acknowledgedAt DateTime?      @map("acknowledged_at")
+  resolvedAt     DateTime?      @map("resolved_at")
+
+  media   ComplaintMedia[]
+  updates ComplaintUpdate[]
+
+  @@index([landlordId, status])
+  @@index([unitId])
+  @@map("complaints")
+}
+
+model ComplaintMedia {
+  id          String             @id @default(uuid())
+  complaintId String             @map("complaint_id")
+  storageUrl  String             @map("storage_url")
+  mediaType   ComplaintMediaType @map("media_type")
+  uploadedAt  DateTime           @default(now()) @map("uploaded_at")
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@map("complaint_media")
+}
+
+// Audit trail of every status change (and any freeform landlord note),
+// per PRD Epic 7 US-7.1 AC2's "tenant sees status updates" — this is what
+// GET /landlords/me/complaints and the tenant-facing history are built on.
+model ComplaintUpdate {
+  id          String           @id @default(uuid())
+  complaintId String           @map("complaint_id")
+  authorId    String           @map("author_id") // references users.id — the landlord who made the change.
+  note        String?
+  newStatus   ComplaintStatus? @map("new_status")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@map("complaint_updates")
+}
+
+// ============================================================
+// Remaining modules (admin) — add here following this exact pattern, in
+// the build order specified in CLAUDE.md. Full DDL is in
+// docs/deployment-infrastructure-and-module-schemas.md
 // ============================================================

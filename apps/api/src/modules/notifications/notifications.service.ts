@@ -25,6 +25,12 @@ import {
   VisitRequestRespondedEvent,
 } from '../../common/events/visit-request.events';
 import {
+  COMPLAINT_CREATED,
+  COMPLAINT_STATUS_CHANGED,
+  ComplaintCreatedEvent,
+  ComplaintStatusChangedEvent,
+} from '../../common/events/complaint.events';
+import {
   NOTIFICATION_FAILED,
   NOTIFICATION_SENT,
   RENT_EXPIRY_DUE_TODAY,
@@ -322,6 +328,37 @@ export class NotificationsService {
   async onVisitRequestResponded(event: VisitRequestRespondedEvent): Promise<void> {
     const tenant = await this.usersService.getPublicProfile(event.tenantId);
     await this.dispatch(event.tenantId, VISIT_REQUEST_RESPONDED, { visitAction: event.action }, null, toLocale(tenant.locale));
+  }
+
+  @OnEvent(COMPLAINT_CREATED)
+  async onComplaintCreated(event: ComplaintCreatedEvent): Promise<void> {
+    const [tenant, unit, landlord] = await Promise.all([
+      this.usersService.getPublicProfile(event.tenantId),
+      this.unitsService.getContractDetails(event.unitId),
+      this.usersService.getPublicProfile(event.landlordId),
+    ]);
+    await this.dispatch(
+      event.landlordId,
+      COMPLAINT_CREATED,
+      { tenantName: tenant.fullName ?? tenant.phoneNumber, unitLabel: unit.label ?? undefined, complaintCategory: event.category },
+      null,
+      toLocale(landlord.locale),
+    );
+  }
+
+  @OnEvent(COMPLAINT_STATUS_CHANGED)
+  async onComplaintStatusChanged(event: ComplaintStatusChangedEvent): Promise<void> {
+    const [tenant, unit] = await Promise.all([
+      this.usersService.getPublicProfile(event.tenantId),
+      this.unitsService.getContractDetails(event.unitId),
+    ]);
+    await this.dispatch(
+      event.tenantId,
+      COMPLAINT_STATUS_CHANGED,
+      { unitLabel: unit.label ?? undefined, complaintStatus: event.newStatus },
+      null,
+      toLocale(tenant.locale),
+    );
   }
 
   // ---------------------------------------------------------------------

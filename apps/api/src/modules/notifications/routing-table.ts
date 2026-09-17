@@ -73,10 +73,27 @@ export const ROUTING_TABLE: Record<string, RoutingRule> = {
     channels: ['push', 'in_app'],
     recipients: 'tenant',
   },
-  // visit_request.expired and complaint.status_changed are NOT routed:
-  // the multichannel doc's own Section 4 table has no entry for the
-  // former, and Complaints (build order #8) doesn't exist yet to emit the
-  // latter — both stay disclosed gaps rather than guessed-at behavior.
+  // complaint.created has no entry in the multichannel doc's Section 4
+  // table (an apparent oversight — that doc predates Complaints existing),
+  // but PRD Epic 7 US-7.1 AC2 explicitly requires the landlord be notified
+  // on creation. Routed by analogy to the structurally identical
+  // visit_request.created (tenant-initiated, landlord needs to know).
+  'complaint.created': {
+    pattern: 'waterfall',
+    channels: ['push', 'whatsapp', 'sms'],
+    recipients: 'landlord',
+  },
+  // complaint.status_changed DOES have a documented entry: "In-app + Push
+  // only (not urgent enough to spend SMS/WhatsApp budget on)".
+  'complaint.status_changed': {
+    pattern: 'waterfall',
+    channels: ['push', 'in_app'],
+    recipients: 'tenant',
+  },
+  // visit_request.expired is NOT routed: the multichannel doc's own
+  // Section 4 table has no entry for it, and it fires from apps/worker — a
+  // separate process from this module's in-process event bus — so there's
+  // no event to subscribe to yet regardless. See README.md's Visits entry.
 };
 
 // Meta requires WhatsApp sends to reference a pre-approved template name
@@ -91,4 +108,5 @@ export const WHATSAPP_TEMPLATE_INFO: Record<string, { templateName: string; cate
   [RENT_EXPIRY_DUE_TODAY]: { templateName: 'rent_reminder_v1', category: 'utility' },
   [RENT_EXPIRY_OVERDUE]: { templateName: 'rent_overdue_v1', category: 'utility' },
   'visit_request.created': { templateName: 'visit_request_v1', category: 'utility' },
+  'complaint.created': { templateName: 'complaint_created_v1', category: 'utility' },
 };

@@ -12,9 +12,10 @@ import { TenanciesModule } from './modules/tenancies/tenancies.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { ContractsModule } from './modules/contracts/contracts.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { ComplaintsModule } from './modules/complaints/complaints.module';
 
-// Remaining feature modules (complaints, admin) get imported here as
-// they're built, following the order in CLAUDE.md.
+// Remaining feature module (admin) gets imported here as it's built,
+// following the order in CLAUDE.md.
 
 @Module({
   imports: [
@@ -30,7 +31,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     PaymentsModule,
     ContractsModule,
     NotificationsModule,
-    // ComplaintsModule, AdminModule — add here
+    ComplaintsModule,
+    // AdminModule — add here
   ],
   controllers: [AppController],
 })
