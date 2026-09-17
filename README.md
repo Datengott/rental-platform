@@ -80,15 +80,42 @@ tested; unchecked = not started or schema-only.
       cron (not the worker) specifically so it shares the event bus Properties'
       `UnitOccupancyListener` subscribes to for `tenancy.created`/`tenancy.terminated`.
       Multi-channel notice delivery (PRD Epic 4 US-4.2 AC2) isn't implemented —
-      Notifications (#7) doesn't exist yet. `current_balance`/`paid_through_date` stay
-      `0`/`null` — Payments (#5) doesn't exist yet either, so there's no ledger to
-      derive them from. A genuine bug the e2e tests caught: `EventEmitter2.emit()` is
+      Notifications (#7) doesn't exist yet. `current_balance`/`paid_through_date` are
+      now live (see Payments below), pulled from Payments' ledger via a real
+      cross-module call. A genuine bug the e2e tests caught: `EventEmitter2.emit()` is
       fire-and-forget, so a client could see stale unit status immediately after
       creating a tenancy — fixed with `emitAsync()` on the events with an active
       cross-module listener. Covered by `tenancies.service.spec.ts` (mocked) and
       `apps/api/test/tenancies.e2e-spec.ts` (real Postgres, including the sweep).
-- [ ] **Payments** — ledger (append-only), mobile money integration — highest
-      engineering risk, aggregator choice still pending
+- [x] **Payments** — append-only ledger, idempotent payment initiation validated
+      against the notice-effective-date cutoff and advance-months cap (both exact
+      contract error codes), plus an amount-vs-billing-cycle check that isn't
+      spec-required but CLAUDE.md calls this "the module to be most conservative and
+      rigorous with." **The aggregator is simulated, by explicit direction** — CamPay/
+      Monetbil credentials don't exist yet, so `charge()` returns an immediate ack and
+      confirmation arrives ~4s later via a genuinely separate, HMAC-signed HTTP call to
+      this app's own `/webhooks/payments/{provider}` endpoint (not an in-process
+      shortcut), so the real signature-verification and webhook-processing code a real
+      provider would hit is actually exercised. A periodic in-process reconciliation
+      sweep is the real safety net if that self-call is ever lost (e.g. a restart),
+      not decorative. Swapping in a real CamPay/Monetbil gateway later only means
+      registering a different class for the same `PaymentGateway` interface — nothing
+      else changes. `ledger_entries.running_balance` is a simple cumulative sum of
+      confirmed payments (total paid to date) — there's no recurring rent-invoicing/
+      debit-generation engine anywhere in the docs, so "amount owed" isn't a number
+      this MVP can honestly compute yet. `current_balance` on the Tenancies dashboard
+      and Payments' own notice/advance-cap checks are a genuine bidirectional read
+      between the two modules, wired with `forwardRef()` (NestJS's supported pattern
+      for this) rather than deferred. Multi-channel receipt delivery (PRD Epic 5 US-5.3
+      AC1) isn't implemented — Notifications (#7) doesn't exist yet. Two real bugs the
+      e2e tests caught: a bare `setTimeout` in the simulated gateway kept Jest from
+      exiting cleanly (fixed with `.unref()`), and that same timer firing well after a
+      ~3s test suite finished corrupted later tests — fixed by overriding the gateway
+      with a pure stub in tests (mirroring the SMS gateway pattern), same as the real
+      gateway is swapped for a real aggregator in production. Covered by
+      `payments.service.spec.ts` (mocked) and `apps/api/test/payments.e2e-spec.ts`
+      (real Postgres, including a real signed webhook round-trip and the
+      reconciliation sweep).
 - [ ] **Contracts** — generation + e-signature (tier decision pending)
 - [ ] **Notifications** — multi-channel routing incl. rent-expiry reminder scheduler
 - [ ] **Complaints**
@@ -97,8 +124,10 @@ tested; unchecked = not started or schema-only.
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
 worker process that verifies its DB/Redis connections on startup (plus a real 15-minute
 visit-request expiry sweep), Docker Compose for local dev (Postgres + Redis + api +
-worker), and the Auth, Properties, Visits, and Tenancies modules fully implemented per
-`docs/api-specification.md` Sections 3–6. Interactive API docs (Swagger UI, generated
+worker), and the Auth, Properties, Visits, Tenancies, and Payments modules fully
+implemented per `docs/api-specification.md` Sections 3–7 — enough to demo the full
+landlord + tenant flow end to end (auth, list a property, tenant pays simulated rent,
+landlord sees it land on their dashboard). Interactive API docs (Swagger UI, generated
 from the same controllers/DTOs) are served at `/docs` in dev.
 
 ## Prerequisites
@@ -191,7 +220,7 @@ apps/
   api/           NestJS application — one module folder per bounded module
   worker/        Background jobs: rent-expiry scheduler, payment reconciliation, notification dispatch
 prisma/
-  schema.prisma  Database schema — Auth, Properties, Visits, Tenancies modeled and implemented
+  schema.prisma  Database schema — Auth, Properties, Visits, Tenancies, Payments modeled and implemented
 docs/            Full product/technical specification (PRD, API spec, architecture, schemas)
 .github/workflows/
   ci.yml         Lint, test, build on every push/PR to main
@@ -201,7 +230,9 @@ docker-compose.yml   Local dev environment (Postgres, Redis, api, worker)
 
 ## Known open decisions
 
-These block implementation of specific modules and need a human call before code is
-written against them (tracked in `docs/PRD-mvp.md` and `CLAUDE.md`):
+These need a human call before the corresponding real integration is built (tracked in
+`docs/PRD-mvp.md` and `CLAUDE.md`):
 
-- Final choice between CamPay and Monetbil as payment aggregator
+- Final choice between CamPay and Monetbil as payment aggregator — the Payments module
+  itself is fully built and demoable behind a simulated gateway (see above) per explicit
+  direction, so this no longer blocks the module; it blocks swapping in the real one.

@@ -1,6 +1,7 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { PropertiesModule } from '../properties/properties.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { TenanciesController } from './tenancies.controller';
 import { TenanciesService } from './tenancies.service';
 
@@ -10,8 +11,11 @@ import { TenanciesService } from './tenancies.service';
   // and belongs to this landlord) — both through their public interfaces,
   // per CLAUDE.md's cross-module rule. Properties' own UnitOccupancyListener
   // (not this module) is what actually flips unit status on our events.
-  imports: [AuthModule, PropertiesModule],
+  // PaymentsModule is a genuine bidirectional dependency (see the forwardRef
+  // comment in tenancies.service.ts) — imported both ways with forwardRef.
+  imports: [AuthModule, PropertiesModule, forwardRef(() => PaymentsModule)],
   controllers: [TenanciesController],
   providers: [TenanciesService],
+  exports: [TenanciesService],
 })
 export class TenanciesModule {}

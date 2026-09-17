@@ -1,6 +1,6 @@
-import { HttpStatus, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { forwardRef, HttpStatus, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { TenancyStatus, UnitStatus } from '@prisma/client';
 import { ApiException } from '../../common/exceptions/api.exception';
 import {
@@ -11,10 +11,12 @@ import {
   TenancyNoticeGivenEvent,
   TenancyTerminatedEvent,
 } from '../../common/events/tenancy.events';
+import { PAYMENT_CONFIRMED, PaymentConfirmedEvent } from '../../common/events/payment.events';
 import { PrismaService } from '../../common/prisma.service';
 import { OBJECT_STORAGE, ObjectStorage } from '../../common/storage/object-storage';
 import { UnitsService } from '../properties/units.service';
 import { UsersService } from '../auth/users.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateTenancyDto } from './dto/create-tenancy.dto';
 import { UpdateReminderSettingsDto } from './dto/update-reminder-settings.dto';
 import { CreateTerminationNoticeDto } from './dto/create-termination-notice.dto';
@@ -36,6 +38,11 @@ export class TenanciesService {
     private readonly usersService: UsersService,
     private readonly events: EventEmitter2,
     @Inject(OBJECT_STORAGE) private readonly objectStorage: ObjectStorage,
+    // forwardRef: Payments needs getPaymentConstraints() from us, and the
+    // landlord dashboard here needs current_balance from Payments' ledger —
+    // a genuine bidirectional read between two closely-related bounded
+    // contexts, not a layering mistake. NestJS's documented pattern for it.
+    @Inject(forwardRef(() => PaymentsService)) private readonly paymentsService: PaymentsService,
   ) {}
 
   async createTenancy(landlordId: string, dto: CreateTenancyDto) {
@@ -101,21 +108,73 @@ export class TenanciesService {
       where: { landlordId },
       orderBy: { createdAt: 'desc' },
     });
-    // current_balance would come from the Payments ledger (module #5,
-    // doesn't exist yet) — 0 is the honest value for "no ledger exists",
-    // not a fabricated number. Same for paid_through_date via toResponse.
-    return tenancies.map((t) => ({ ...this.toResponse(t), current_balance: 0 }));
+    return Promise.all(
+      tenancies.map(async (t) => ({
+        ...this.toResponse(t),
+        current_balance: await this.paymentsService.getCurrentBalance(t.id),
+      })),
+    );
   }
 
   async getById(requesterId: string, tenancyId: string) {
     const tenancy = await this.getAccessibleTenancy(requesterId, tenancyId);
+    const [currentBalance, recentEntries] = await Promise.all([
+      this.paymentsService.getCurrentBalance(tenancyId),
+      this.paymentsService.getRecentLedgerEntries(tenancyId, 5),
+    ]);
     return {
       ...this.toResponse(tenancy),
-      current_balance: 0,
-      // Contracts (#6) and Payments (#5) don't exist yet.
+      current_balance: currentBalance,
+      recent_ledger_entries: recentEntries,
+      // Contracts (#6) doesn't exist yet.
       contract_status: null,
-      recent_ledger_entries: [],
     };
+  }
+
+  // Public interface for Payments (through this, never a direct read of
+  // Tenancies' Prisma models, per CLAUDE.md). Gives Payments everything it
+  // needs to validate a payment request in one call, synchronously, rather
+  // than maintaining a denormalized event-driven cache of this same data
+  // (see the comment in common/events/payment.events.ts).
+  async getPaymentConstraints(tenancyId: string) {
+    const tenancy = await this.prisma.tenancy.findUnique({
+      where: { id: tenancyId },
+      include: { terminationNotices: { orderBy: { issuedAt: 'desc' }, take: 1 } },
+    });
+    if (!tenancy) {
+      throw new NotFoundException('Tenancy not found');
+    }
+
+    const activeNotice =
+      tenancy.status === TenancyStatus.notice_given ? tenancy.terminationNotices[0] : undefined;
+
+    return {
+      tenancyId: tenancy.id,
+      tenantId: tenancy.tenantId,
+      landlordId: tenancy.landlordId,
+      status: tenancy.status,
+      rentAmount: tenancy.rentAmount,
+      billingCycle: tenancy.billingCycle,
+      maxAdvanceMonths: tenancy.maxAdvanceMonths,
+      activeNoticeEffectiveDate: activeNotice?.effectiveDate ?? null,
+    };
+  }
+
+  // payment.confirmed -> recompute paid_through_date, per schema doc B.4's
+  // documented event consumption. Uses ONLY the event payload (a running
+  // MAX), never a query against Payments' own tables.
+  @OnEvent(PAYMENT_CONFIRMED)
+  async handlePaymentConfirmed(event: PaymentConfirmedEvent) {
+    const tenancy = await this.prisma.tenancy.findUnique({ where: { id: event.tenancyId } });
+    if (!tenancy) return;
+
+    const newPeriodEnd = new Date(event.periodEnd);
+    if (!tenancy.paidThroughDate || newPeriodEnd > tenancy.paidThroughDate) {
+      await this.prisma.tenancy.update({
+        where: { id: event.tenancyId },
+        data: { paidThroughDate: newPeriodEnd },
+      });
+    }
   }
 
   async updateReminderSettings(landlordId: string, tenancyId: string, dto: UpdateReminderSettingsDto) {

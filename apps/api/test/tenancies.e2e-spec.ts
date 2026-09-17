@@ -43,6 +43,11 @@ describe('Tenancies module (e2e)', () => {
 
     app = moduleRef.createNestApplication();
     configureApp(app);
+    // @nestjs/schedule's cron jobs (this module's own sweepNoticeExpirations)
+    // are only cleared on shutdown if shutdown hooks are enabled — without
+    // this, app.close() leaves a live timer behind and Jest never exits
+    // cleanly.
+    app.enableShutdownHooks();
     await app.init();
 
     prisma = app.get(PrismaService);
