@@ -4,6 +4,7 @@
     "types": ["node", "jest", "express", "multer"],
     "isolatedModules": true,
     "declaration": false,
-    "rootDir": "."
+    "rootDir": ".",
+    "allowJs": true
   }
 }

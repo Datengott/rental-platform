@@ -4,6 +4,7 @@ import { PropertiesController } from './properties.controller';
 import { UnitsController } from './units.controller';
 import { PropertiesService } from './properties.service';
 import { UnitsService } from './units.service';
+import { UnitOccupancyListener } from './unit-occupancy.listener';
 
 @Module({
   // AuthModule for JwtAuthGuard (route protection) and UsersService
@@ -11,7 +12,7 @@ import { UnitsService } from './units.service';
   // CLAUDE.md's cross-module rule.
   imports: [AuthModule],
   controllers: [PropertiesController, UnitsController],
-  providers: [PropertiesService, UnitsService],
+  providers: [PropertiesService, UnitsService, UnitOccupancyListener],
   // Visits needs UnitsService.getUnitOwnership() to denormalize landlord_id
   // onto a visit request — through this public interface, never Properties'
   // Prisma models directly.

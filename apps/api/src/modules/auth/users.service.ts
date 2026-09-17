@@ -103,6 +103,14 @@ export class UsersService {
     this.events.emit(USER_ROLE_GRANTED, { userId, role } satisfies UserRoleGrantedEvent);
   }
 
+  // Public interface for other modules that need to validate a user id
+  // (e.g. Tenancies validating the tenant_id it's given) without a direct
+  // Prisma read of Auth's tables, per CLAUDE.md's cross-module rule.
+  async exists(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+    return user !== null;
+  }
+
   private toProfile(user: {
     id: string;
     fullName: string | null;

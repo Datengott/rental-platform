@@ -211,7 +211,76 @@ model VisitRequest {
 }
 
 // ============================================================
-// Remaining modules (tenancies, payments, contracts,
+// B.4 — Tenancy & Occupancy Module
+// ============================================================
+
+enum TenancyStatus {
+  active
+  notice_given
+  terminated
+  expired
+}
+
+enum NoticeReason {
+  non_payment
+  end_of_term
+  other
+}
+
+model Tenancy {
+  id                        String        @id @default(uuid())
+  unitId                    String        @map("unit_id") // references units.id — NOT a Prisma
+                                                             // relation across modules, per CLAUDE.md.
+  tenantId                  String        @map("tenant_id") // references users.id — same rule.
+  landlordId                String        @map("landlord_id") // same rule.
+  startDate                 DateTime      @map("start_date") @db.Date
+  rentAmount                Decimal       @db.Decimal(12, 0) @map("rent_amount")
+  currency                  String        @default("XAF")
+  billingCycle               String       @default("monthly") @map("billing_cycle")
+  noticePeriodDays           Int          @default(90) @map("notice_period_days")
+  maxAdvanceMonths           Int          @default(3) @map("max_advance_months")
+  // Denormalized cache written ONLY by the Payments module's payment.confirmed
+  // handler (once that module exists) — never written directly here. Ledger
+  // stays authoritative; this just lets the reminder scheduler avoid
+  // aggregating the ledger on every run. See schema doc B.4.
+  paidThroughDate             DateTime?    @map("paid_through_date") @db.Date
+  reminderFirstDaysBefore     Int          @default(30) @map("reminder_first_days_before")
+  reminderSecondDaysBefore    Int          @default(14) @map("reminder_second_days_before")
+  status                      TenancyStatus @default(active)
+  createdAt                   DateTime     @default(now()) @map("created_at")
+  updatedAt                   DateTime     @updatedAt @map("updated_at")
+
+  terminationNotices TerminationNotice[]
+
+  @@index([landlordId, status])
+  @@index([tenantId, status])
+  // idx_tenancies_paid_through in the schema doc is a PARTIAL index
+  // (WHERE status = 'active') — same limitation as visit_requests'
+  // idx_visit_expiry; plain index instead, callers still filter explicitly.
+  @@index([paidThroughDate])
+  @@map("tenancies")
+}
+
+model TerminationNotice {
+  id                  String        @id @default(uuid())
+  tenancyId           String        @map("tenancy_id")
+  issuedBy             String       @map("issued_by") // references users.id — must be the landlord.
+  reason                NoticeReason?
+  reasonDetail          String?      @map("reason_detail")
+  issuedAt               DateTime    @default(now()) @map("issued_at")
+  effectiveDate           DateTime   @map("effective_date") @db.Date
+  documentUrl              String?   @map("document_url")
+  deliveryChannel           String?  @map("delivery_channel") // 'sms' | 'app' | 'both'
+  deliveryConfirmedAt        DateTime? @map("delivery_confirmed_at")
+  createdAt                   DateTime @default(now()) @map("created_at")
+
+  tenancy Tenancy @relation(fields: [tenancyId], references: [id])
+
+  @@map("termination_notices")
+}
+
+// ============================================================
+// Remaining modules (payments, contracts,
 // notifications, complaints, admin) — add here following this
 // exact pattern, in the build order specified in CLAUDE.md.
 // Full DDL for all of them is in:

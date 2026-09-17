@@ -167,7 +167,10 @@ export class UnitsService {
     return toUnitResponse(updated);
   }
 
-  private async transitionStatus(unitId: string, from: UnitStatus, to: UnitStatus) {
+  // Public so the occupancy listener (this module's own reaction to
+  // tenancy.created/tenancy.terminated) can drive it — that's this
+  // module's own code reacting to events, not a cross-module Prisma write.
+  async transitionStatus(unitId: string, from: UnitStatus, to: UnitStatus) {
     await this.prisma.unit.update({ where: { id: unitId }, data: { status: to } });
     this.events.emit(UNIT_STATUS_CHANGED, {
       unitId,
@@ -185,16 +188,20 @@ export class UnitsService {
   }
 
   // Public interface for other modules (Visits needs to know who owns a
-  // unit to denormalize landlord_id onto a visit request) — never a direct
-  // Prisma import of Properties' models, per CLAUDE.md's cross-module rule.
-  async getUnitOwnership(unitId: string): Promise<{ id: string; propertyId: string; landlordId: string }> {
+  // unit to denormalize landlord_id onto a visit request; Tenancies also
+  // needs current status to reject creating a tenancy on a non-vacant
+  // unit) — never a direct Prisma import of Properties' models, per
+  // CLAUDE.md's cross-module rule.
+  async getUnitOwnership(
+    unitId: string,
+  ): Promise<{ id: string; propertyId: string; landlordId: string; status: UnitStatus }> {
     const unit = await this.prisma.unit.findUnique({
       where: { id: unitId },
-      select: { id: true, propertyId: true, property: { select: { landlordId: true } } },
+      select: { id: true, propertyId: true, status: true, property: { select: { landlordId: true } } },
     });
     if (!unit) {
       throw new NotFoundException('Unit not found');
     }
-    return { id: unit.id, propertyId: unit.propertyId, landlordId: unit.property.landlordId };
+    return { id: unit.id, propertyId: unit.propertyId, landlordId: unit.property.landlordId, status: unit.status };
   }
 }

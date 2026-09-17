@@ -71,8 +71,22 @@ tested; unchecked = not started or schema-only.
       event bus is shared between the worker and api processes, and Notifications
       doesn't exist yet. Covered by `visits.service.spec.ts` (mocked) and
       `apps/api/test/visits.e2e-spec.ts` (real Postgres).
-- [ ] **Tenancies** — occupancy, termination notices (statutory notice-period floor
-      pending legal sign-off — see `docs/PRD-mvp.md` Epic 4)
+- [x] **Tenancies** — create tenancy on a vacant unit (rejects non-vacant units and a
+      notice_period_days below the confirmed 90-day statutory floor), reminder-setting
+      updates, termination notices (validates `effective_date` against the floor and
+      returns the earliest valid date on rejection, generates a real bilingual FR/EN
+      document), and a real notice-expiry sweep that terminates the tenancy and frees
+      the unit once `effective_date` passes. Runs as an in-process `@nestjs/schedule`
+      cron (not the worker) specifically so it shares the event bus Properties'
+      `UnitOccupancyListener` subscribes to for `tenancy.created`/`tenancy.terminated`.
+      Multi-channel notice delivery (PRD Epic 4 US-4.2 AC2) isn't implemented —
+      Notifications (#7) doesn't exist yet. `current_balance`/`paid_through_date` stay
+      `0`/`null` — Payments (#5) doesn't exist yet either, so there's no ledger to
+      derive them from. A genuine bug the e2e tests caught: `EventEmitter2.emit()` is
+      fire-and-forget, so a client could see stale unit status immediately after
+      creating a tenancy — fixed with `emitAsync()` on the events with an active
+      cross-module listener. Covered by `tenancies.service.spec.ts` (mocked) and
+      `apps/api/test/tenancies.e2e-spec.ts` (real Postgres, including the sweep).
 - [ ] **Payments** — ledger (append-only), mobile money integration — highest
       engineering risk, aggregator choice still pending
 - [ ] **Contracts** — generation + e-signature (tier decision pending)
@@ -83,8 +97,8 @@ tested; unchecked = not started or schema-only.
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
 worker process that verifies its DB/Redis connections on startup (plus a real 15-minute
 visit-request expiry sweep), Docker Compose for local dev (Postgres + Redis + api +
-worker), and the Auth, Properties, and Visits modules fully implemented per
-`docs/api-specification.md` Sections 3–5. Interactive API docs (Swagger UI, generated
+worker), and the Auth, Properties, Visits, and Tenancies modules fully implemented per
+`docs/api-specification.md` Sections 3–6. Interactive API docs (Swagger UI, generated
 from the same controllers/DTOs) are served at `/docs` in dev.
 
 ## Prerequisites
@@ -177,7 +191,7 @@ apps/
   api/           NestJS application — one module folder per bounded module
   worker/        Background jobs: rent-expiry scheduler, payment reconciliation, notification dispatch
 prisma/
-  schema.prisma  Database schema — Auth, Properties, Visits modules modeled and implemented
+  schema.prisma  Database schema — Auth, Properties, Visits, Tenancies modeled and implemented
 docs/            Full product/technical specification (PRD, API spec, architecture, schemas)
 .github/workflows/
   ci.yml         Lint, test, build on every push/PR to main
@@ -190,6 +204,4 @@ docker-compose.yml   Local dev environment (Postgres, Redis, api, worker)
 These block implementation of specific modules and need a human call before code is
 written against them (tracked in `docs/PRD-mvp.md` and `CLAUDE.md`):
 
-- Exact statutory notice-period defaults per region (placeholder of 90 days in the
-  schema, pending lawyer confirmation)
 - Final choice between CamPay and Monetbil as payment aggregator
