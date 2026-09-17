@@ -391,10 +391,129 @@ model Contract {
 }
 
 // ============================================================
-// Remaining modules (notifications, complaints, admin) — add here
-// following this exact pattern, in the build order specified in
-// CLAUDE.md. Full DDL for all of them is in:
-//   docs/deployment-infrastructure-and-module-schemas.md
-//   docs/notification-module-multichannel.md (notifications supersedes
-//   the single-channel version in the schema doc — use that one)
+// B.7 — Notification Engine Module (multi-channel version;
+// docs/notification-module-multichannel.md Section 3 is the source of
+// truth here, superseding the single-channel schema in the main
+// deployment doc, per CLAUDE.md).
+// ============================================================
+
+enum NotificationChannelType {
+  sms
+  whatsapp
+  email
+  push
+  in_app
+}
+
+enum NotificationStatus {
+  queued
+  sent
+  delivered
+  read
+  failed
+  skipped
+}
+
+enum PushPlatform {
+  android
+  ios
+}
+
+// notification_templates from the multichannel doc's DDL is deliberately
+// NOT modeled here: there's no admin UI to manage templates yet (Admin is
+// build order #9), so a DB table of template rows would just be seed data
+// nothing ever edits — the same "dead schema with no writer" reasoning as
+// skipping contract_signatures. Templates are hardcoded bilingual render
+// functions per event type instead (notification-content.ts), mirroring
+// contract-document.ts/notice-document.ts/receipt-document.ts. Revisit if
+// Admin ever needs to manage these directly. `notifications.template_id`
+// is dropped for the same reason — event_type + channel already identify
+// what was sent.
+model Notification {
+  id                     String               @id @default(uuid())
+  userId                 String               @map("user_id") // references users.id — NOT a Prisma
+                                                                   // relation across modules, per CLAUDE.md.
+  eventType              String               @map("event_type")
+  channel                NotificationChannelType
+  payload                Json?
+  status                 NotificationStatus   @default(queued)
+  skipReason             String?              @map("skip_reason")
+  provider               String?
+  providerMessageId      String?              @map("provider_message_id")
+  whatsappCategoryBilled String?              @map("whatsapp_category_billed")
+  estimatedCostXaf       Decimal?             @db.Decimal(8, 2) @map("estimated_cost_xaf")
+  scheduledFor           DateTime?            @map("scheduled_for")
+  sentAt                 DateTime?            @map("sent_at")
+  deliveredAt            DateTime?            @map("delivered_at")
+  readAt                 DateTime?            @map("read_at")
+  createdAt              DateTime             @default(now()) @map("created_at")
+
+  // idx_notifications_scheduled/idx_notifications_cost_audit from the doc
+  // are PARTIAL indexes (WHERE status = 'queued' / WHERE channel =
+  // 'whatsapp') — same limitation noted elsewhere on partial indexes not
+  // expressible in Prisma; callers still filter explicitly.
+  @@index([userId, readAt])
+  @@index([scheduledFor])
+  @@index([channel, createdAt])
+  @@map("notifications")
+}
+
+// Per-user, per-channel opt-in state for the channels that need explicit
+// consent/identifier capture (sms/whatsapp/email). Push is tracked via
+// PushDeviceToken instead (the token itself is both identifier and proof
+// of reachability); in_app needs no opt-in row — it's the unconditional
+// fallback channel, per the doc's own channel list for this table
+// excluding 'in_app'.
+model NotificationChannel {
+  id               String                   @id @default(uuid())
+  userId           String                   @map("user_id")
+  channel          NotificationChannelType
+  channelIdentifier String                  @map("channel_identifier")
+  optedIn          Boolean                  @default(false) @map("opted_in")
+  optedInAt        DateTime?                @map("opted_in_at")
+  optedOutAt       DateTime?                @map("opted_out_at")
+  verified         Boolean                  @default(false)
+  lastKnownGoodAt  DateTime?                @map("last_known_good_at")
+  createdAt        DateTime                 @default(now()) @map("created_at")
+
+  @@unique([userId, channel])
+  @@map("notification_channels")
+}
+
+model PushDeviceToken {
+  id         String       @id @default(uuid())
+  userId     String       @map("user_id")
+  fcmToken   String       @unique @map("fcm_token")
+  platform   PushPlatform
+  lastSeenAt DateTime     @default(now()) @map("last_seen_at")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("push_device_tokens")
+}
+
+// `rent_reminder_days_before` from the multichannel doc's DDL is
+// deliberately omitted: it's a leftover from the original single-channel
+// design (a single per-user reminder offset). Tenancies already owns the
+// real, already-implemented, landlord-configurable version of this
+// setting — two PER-TENANCY fields (`reminder_first_days_before`/
+// `reminder_second_days_before`, see Tenancy model above), which is what
+// the rent-expiry scan actually reads (schema doc B.7's pseudocode).
+// A second, disconnected per-user field here would never be read by
+// anything — dead data, not "matching the DDL for its own sake."
+model NotificationPreference {
+  userId               String  @id @map("user_id")
+  preferredChannelOrder String @default("push,whatsapp,sms,email") @map("preferred_channel_order")
+  smsEnabled           Boolean @default(true) @map("sms_enabled")
+  whatsappEnabled      Boolean @default(false) @map("whatsapp_enabled")
+  emailEnabled         Boolean @default(true) @map("email_enabled")
+  pushEnabled          Boolean @default(true) @map("push_enabled")
+
+  @@map("notification_preferences")
+}
+
+// ============================================================
+// Remaining modules (complaints, admin) — add here following this
+// exact pattern, in the build order specified in CLAUDE.md. Full DDL
+// for all of them is in docs/deployment-infrastructure-and-module-schemas.md
 // ============================================================

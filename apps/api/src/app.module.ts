@@ -11,15 +11,16 @@ import { VisitsModule } from './modules/visits/visits.module';
 import { TenanciesModule } from './modules/tenancies/tenancies.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { ContractsModule } from './modules/contracts/contracts.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
-// Remaining feature modules (notifications, complaints, admin) get
-// imported here as they're built, following the order in CLAUDE.md.
+// Remaining feature modules (complaints, admin) get imported here as
+// they're built, following the order in CLAUDE.md.
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     EventEmitterModule.forRoot(), // backs the internal cross-module event bus
-    ScheduleModule.forRoot(), // backs @Cron() — Tenancies'/Payments' in-process sweeps
+    ScheduleModule.forRoot(), // backs @Cron() — Tenancies'/Payments'/Notifications' in-process sweeps
     PrismaModule,
     StorageModule,
     AuthModule,
@@ -28,7 +29,8 @@ import { ContractsModule } from './modules/contracts/contracts.module';
     TenanciesModule,
     PaymentsModule,
     ContractsModule,
-    // NotificationsModule, ComplaintsModule, AdminModule — add here
+    NotificationsModule,
+    // ComplaintsModule, AdminModule — add here
   ],
   controllers: [AppController],
 })

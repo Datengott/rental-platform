@@ -162,6 +162,53 @@ export class TenanciesService {
     };
   }
 
+  // Public interface for Notifications, which needs to resolve a bare
+  // tenancyId (from events like TENANCY_NOTICE_GIVEN/PAYMENT_CONFIRMED
+  // that don't carry tenantId/landlordId/unitId directly) to the parties
+  // and unit to notify about — never a direct Prisma read of Tenancies'
+  // models, per CLAUDE.md's cross-module rule. No access check: this is an
+  // internal system lookup triggered by an event listener, not a
+  // user-facing request with a requester to authorize.
+  async getPartiesForTenancy(tenancyId: string): Promise<{ tenantId: string; landlordId: string; unitId: string } | null> {
+    const tenancy = await this.prisma.tenancy.findUnique({
+      where: { id: tenancyId },
+      select: { tenantId: true, landlordId: true, unitId: true },
+    });
+    return tenancy ? { tenantId: tenancy.tenantId, landlordId: tenancy.landlordId, unitId: tenancy.unitId } : null;
+  }
+
+  // Public interface for Notifications' rent-expiry reminder scheduler
+  // (docs/deployment-infrastructure-and-module-schemas.md Section B.7's
+  // pseudocode) — never a direct Prisma read of Tenancies' models, per
+  // CLAUDE.md's cross-module rule. Mirrors that pseudocode's own candidate
+  // query almost exactly; the caller applies the day-by-day threshold
+  // logic itself using these fields.
+  async listActiveForReminderScan(): Promise<
+    {
+      id: string;
+      tenantId: string;
+      landlordId: string;
+      unitId: string;
+      paidThroughDate: Date | null;
+      reminderFirstDaysBefore: number;
+      reminderSecondDaysBefore: number;
+    }[]
+  > {
+    const tenancies = await this.prisma.tenancy.findMany({
+      where: { status: TenancyStatus.active, paidThroughDate: { not: null } },
+      select: {
+        id: true,
+        tenantId: true,
+        landlordId: true,
+        unitId: true,
+        paidThroughDate: true,
+        reminderFirstDaysBefore: true,
+        reminderSecondDaysBefore: true,
+      },
+    });
+    return tenancies;
+  }
+
   // Public interface for Contracts (through this, never a direct read of
   // Tenancies' Prisma models, per CLAUDE.md). Reuses the same access check
   // as getById() — api-specification.md Section 8 doesn't mark
@@ -250,13 +297,19 @@ export class TenanciesService {
         effectiveDate,
         documentUrl,
         // Real multi-channel delivery (PRD Epic 4 US-4.2 AC2: SMS + WhatsApp
-        // + Email + Push + In-app fan-out) needs the Notifications module
-        // (build order #7), which doesn't exist yet — delivery_channel and
-        // delivery_confirmed_at stay null until it does. Logged here so the
-        // gap is visible rather than silently faked.
+        // + Email + Push + In-app fan-out) is now wired — the Notifications
+        // module (build order #7) subscribes to TENANCY_NOTICE_GIVEN below
+        // and fans out for real. delivery_channel/delivery_confirmed_at on
+        // THIS row stay null deliberately, though: with 5 possible channels
+        // each with its own status, a single "the" delivery channel/
+        // timestamp on the notice itself can't represent that. The
+        // Notifications module's own `notifications` table (queryable by
+        // `payload.tenancyId`) is the real, richer evidentiary record per
+        // channel — timestamp, channel, provider, status — satisfying
+        // AC3 there instead of duplicating a flattened summary here.
       },
     });
-    this.logger.log(`Termination notice ${notice.id} generated for tenancy ${tenancy.id}; delivery not yet wired.`);
+    this.logger.log(`Termination notice ${notice.id} generated for tenancy ${tenancy.id}; fan-out delivery handled by Notifications.`);
 
     await this.prisma.tenancy.update({ where: { id: tenancy.id }, data: { status: TenancyStatus.notice_given } });
 

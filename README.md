@@ -19,11 +19,12 @@ getting the environment running and tracking where the build stands.
 | API                | NestJS (TypeScript) — modular monolith                |
 | Database           | PostgreSQL via Prisma ORM                              |
 | Cache / queues     | Redis (Upstash-compatible)                             |
-| Background jobs    | Standalone worker app (rent-expiry scheduler, payment reconciliation, notification dispatch) |
+| Background jobs    | Standalone worker app (visit-request expiry sweep) — the rent-expiry reminder scan, notice-expiry sweep, and payment reconciliation all run in-process instead (`@nestjs/schedule`), so they share the api's own event bus |
 | Local dev          | Docker + Docker Compose                                |
 | Deploy target      | Google Cloud Run (`africa-south1`, pending latency test) |
 | Object storage     | Cloudflare R2 (zero egress fees)                        |
 | Payments           | Mobile money aggregator — CamPay or Monetbil (final choice pending) |
+| Notifications      | Africa's Talking (SMS + WhatsApp), Resend (email, recommended — see below), Firebase Cloud Messaging (push) — all behind dev-stub gateways for now, no real credentials wired up yet |
 
 ## Architecture at a glance
 
@@ -67,9 +68,14 @@ tested; unchecked = not started or schema-only.
       The spec has no follow-up endpoint for a tenant to respond to a "rescheduled"
       counter-proposal, and the DDL has no separate column for it — the landlord's
       proposed time is stored in `confirmed_slot`, disambiguated by `status`.
-      "Tenant is notified" on expiry (PRD Epic 3 US-3.1 AC2) isn't implemented — no
-      event bus is shared between the worker and api processes, and Notifications
-      doesn't exist yet. Covered by `visits.service.spec.ts` (mocked) and
+      "Tenant is notified" on expiry (PRD Epic 3 US-3.1 AC2) isn't implemented —
+      the expiry sweep runs in `apps/worker`, a separate process from the api's
+      in-process event bus Notifications listens on, so there's no event for it to
+      subscribe to yet even though Notifications (#7) itself now exists; the
+      multichannel doc's own routing table (Section 4) also has no entry for
+      `visit_request.expired` specifically. `visit_request.created`/`.responded`
+      (handled entirely within the api process) ARE wired — see Notifications
+      below. Covered by `visits.service.spec.ts` (mocked) and
       `apps/api/test/visits.e2e-spec.ts` (real Postgres).
 - [x] **Tenancies** — create tenancy on a vacant unit (rejects non-vacant units and a
       notice_period_days below the confirmed 90-day statutory floor), reminder-setting
@@ -79,8 +85,9 @@ tested; unchecked = not started or schema-only.
       the unit once `effective_date` passes. Runs as an in-process `@nestjs/schedule`
       cron (not the worker) specifically so it shares the event bus Properties'
       `UnitOccupancyListener` subscribes to for `tenancy.created`/`tenancy.terminated`.
-      Multi-channel notice delivery (PRD Epic 4 US-4.2 AC2) isn't implemented —
-      Notifications (#7) doesn't exist yet. `current_balance`/`paid_through_date` are
+      Multi-channel notice delivery (PRD Epic 4 US-4.2 AC2) is now wired via the
+      Notifications module (#7, see below) — issuing a notice fans out to the tenant
+      over SMS/WhatsApp/Email/Push/in-app. `current_balance`/`paid_through_date` are
       now live (see Payments below), pulled from Payments' ledger via a real
       cross-module call. A genuine bug the e2e tests caught: `EventEmitter2.emit()` is
       fire-and-forget, so a client could see stale unit status immediately after
@@ -107,7 +114,8 @@ tested; unchecked = not started or schema-only.
       and Payments' own notice/advance-cap checks are a genuine bidirectional read
       between the two modules, wired with `forwardRef()` (NestJS's supported pattern
       for this) rather than deferred. Multi-channel receipt delivery (PRD Epic 5 US-5.3
-      AC1) isn't implemented — Notifications (#7) doesn't exist yet. Two real bugs the
+      AC1) is now wired via the Notifications module (#7, see below) — `payment.confirmed`
+      fans out to the tenant over SMS/WhatsApp/in-app/push. Two real bugs the
       e2e tests caught: a bare `setTimeout` in the simulated gateway kept Jest from
       exiting cleanly (fixed with `.unref()`), and that same timer firing well after a
       ~3s test suite finished corrupted later tests — fixed by overriding the gateway
@@ -133,7 +141,56 @@ tested; unchecked = not started or schema-only.
       same pattern as the Tenancies↔Payments dependency. Covered by
       `contracts.service.spec.ts` (mocked) and `apps/api/test/contracts.e2e-spec.ts`
       (real Postgres).
-- [ ] **Notifications** — multi-channel routing incl. rent-expiry reminder scheduler
+- [x] **Notifications** — real multi-channel routing engine (SMS/WhatsApp/Email/
+      Push/in-app) per `docs/notification-module-multichannel.md`, with **every
+      provider behind a swappable dev-stub gateway** (console-log, same pattern as
+      Auth's SMS) since no real Africa's Talking/Resend/FCM credentials exist yet —
+      SMS reuses Auth's existing `SmsGateway` directly rather than a second
+      implementation. Two real patterns from the doc, both built for real:
+      - **Fan-out** (`tenancy.notice_given`, `payment.confirmed`, `payment.failed`,
+        all four `rent_expiry.*` stages) sends to every channel the user has opted
+        into, each recorded as its own row in `notifications`.
+      - **Waterfall** (`visit_request.created`, `visit_request.responded`) sends to
+        the first reachable channel in priority order only. The doc's timed
+        escalation-to-the-next-channel-on-no-response behavior is **not** built —
+        no job-queue/scheduled-recheck infra exists in this project, and nothing
+        marks it protected the way the reminder scheduler is — so this is "single
+        best channel," not the full waterfall. Disclosed in `routing-table.ts`.
+
+      **The rent-expiry reminder scheduler is fully built**, per CLAUDE.md's explicit
+      "don't simplify away" instruction and the exact pseudocode in the schema doc's
+      Section B.7 — a daily `@Cron` scan (also callable directly, like Tenancies'/
+      Payments' own sweeps) that fires first/second/due-today/overdue reminders to
+      **both** tenant and landlord (PRD Epic 8 US-8.2 AC1, a hard requirement), reading
+      each tenancy's own landlord-configurable `reminder_first_days_before`/
+      `reminder_second_days_before` (already built in Tenancies) rather than a
+      redundant per-user setting. Idempotent via the doc's own `already_sent()` guard
+      (a same-day existence check against `notifications`), so a retried/re-run scan
+      never double-sends.
+
+      Other deliberate scope decisions, each disclosed in code:
+      - `notification_templates` isn't a persisted table — no admin UI exists to
+        manage templates yet (Admin is #9), so it would be seed data nothing edits.
+        Bilingual copy is hardcoded per event type (`notification-content.ts`),
+        mirroring `contract-document.ts`/`notice-document.ts`/`receipt-document.ts`.
+      - `notification_preferences.rent_reminder_days_before` (the doc's older,
+        single-stage, per-user field) is dropped — Tenancies' real two-stage,
+        per-tenancy fields are what the scheduler actually reads.
+      - `contract.generated`, `visit_request.expired`, and `complaint.status_changed`
+        are **not** routed: the first two have no entry in the doc's own routing
+        table, and Complaints (build order #8) doesn't exist yet to emit the third.
+      - The monthly landlord statement (email-only, per the doc's Pattern B table)
+        isn't built — it's a new aggregation job, not a listener on an existing
+        event, and nothing marks it protected the way the reminder scheduler is.
+
+      A real bug the e2e tests caught: fan-out dispatches to every channel
+      concurrently (`Promise.all`), and the first-ever notification for a user
+      raced two concurrent inserts of the same `notification_preferences` row —
+      fixed by ensuring that row exists once, before the concurrent fan-out, rather
+      than relying on each channel's own upsert to be atomic enough on its own.
+      Covered by `notifications.service.spec.ts` (mocked, 15 cases) and
+      `apps/api/test/notifications.e2e-spec.ts` (real Postgres, including the
+      reminder scheduler's idempotency and a real webhook status-update round-trip).
 - [ ] **Complaints**
 - [ ] **Admin** — thin wrappers over other modules' APIs + audit log
 
@@ -256,3 +313,9 @@ These need a human call before the corresponding real integration is built (trac
   Contracts module's document *generation* is fully built (see above) per explicit
   direction, so this no longer blocks that; it blocks building `POST /contracts/{id}/sign`
   at all, which doesn't exist yet.
+- Whether Cameroon is inside Africa's Talking's *WhatsApp* (Chat API) coverage
+  specifically — their SMS coverage is confirmed, but the multichannel doc couldn't
+  confirm WhatsApp coverage in this research pass and recommends a sandbox check
+  before committing. Doesn't block anything today: the Notifications module is fully
+  built behind a `WhatsAppGateway` interface with a console-log dev stub (see above);
+  this only matters once real Africa's Talking credentials are being wired up.
