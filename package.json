@@ -20,5 +20,11 @@
     "dotenv": "^17.4.2",
     "prisma": "^7.9.1",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "multer": "^2.4.0",
+    "qs": "^6.16.0",
+    "mysql2": "^3.24.4",
+    "deepmerge-ts": "^8.0.2"
   }
 }
