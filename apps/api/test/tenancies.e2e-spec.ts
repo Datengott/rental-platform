@@ -112,6 +112,33 @@ describe('Tenancies module (e2e)', () => {
     expect(units.body.find((u: { id: string }) => u.id === unitId).status).toBe('occupied');
   });
 
+  it("lists the tenant's own tenancies on /tenants/me/tenancies, mirroring the landlord's view", async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+
+    const created = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 150000 })
+      .expect(201);
+
+    const tenantList = await request(app.getHttpServer())
+      .get('/v1/tenants/me/tenancies')
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    expect(tenantList.body).toHaveLength(1);
+    expect(tenantList.body[0]).toMatchObject({ id: created.body.id, status: 'active', months_paid_ahead: 0 });
+
+    // A stranger (nor the landlord themselves, calling the tenant-side
+    // route) never sees someone else's tenancy here.
+    const landlordCallingTenantRoute = await request(app.getHttpServer())
+      .get('/v1/tenants/me/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(landlordCallingTenantRoute.body).toEqual([]);
+  });
+
   it('rejects creating a tenancy on a non-vacant unit', async () => {
     const landlord = await signUp(app, fakeSms, randomPhoneNumber());
     const unitId = await createVacantUnit(landlord.access_token);

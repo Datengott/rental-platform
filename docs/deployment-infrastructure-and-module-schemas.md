@@ -202,10 +202,18 @@ CREATE TABLE sessions (
 **Responsibility:** landlord property/unit inventory, photos, listing status.
 
 ```sql
+-- property_type and facilities below aren't in this DDL originally — added
+-- 2026-09-18 to the Prisma schema after live demo feedback asked for more
+-- property detail than address+city+rent. Prisma is the source of truth
+-- for these two columns; this DDL comment documents the deviation rather
+-- than being kept byte-for-byte in sync (same pattern already used for the
+-- units.status default discrepancy noted below).
 CREATE TABLE properties (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     landlord_id         UUID NOT NULL,                   -- references users.id (Auth module, no FK across modules)
     name                VARCHAR(150),
+    property_type       VARCHAR(20),                     -- 'residential' | 'commercial' | 'mixed_use', optional
+    facilities          TEXT[] NOT NULL DEFAULT '{}',     -- freeform tags: 'gated', 'generator', 'borehole', 'security_personnel', ...
     address_line        TEXT NOT NULL,
     city                VARCHAR(80) NOT NULL,
     region              VARCHAR(80),                     -- e.g. 'Littoral', 'Centre'
@@ -224,6 +232,7 @@ CREATE TABLE units (
     label               VARCHAR(50),                     -- e.g. "Unit 4B"
     bedrooms            SMALLINT,
     bathrooms           SMALLINT,
+    facilities          TEXT[] NOT NULL DEFAULT '{}',     -- freeform tags: 'ac', 'wifi', 'hot_water', 'furnished', ... — added 2026-09-18, same reasoning as properties.facilities above
     size_sqm            NUMERIC(8,2),
     rent_amount         NUMERIC(12,0) NOT NULL,          -- XAF has no minor unit; store as integer-like numeric
     currency            CHAR(3) NOT NULL DEFAULT 'XAF',
@@ -283,7 +292,33 @@ CREATE TABLE visit_requests (
 );
 CREATE INDEX idx_visit_landlord_status ON visit_requests(landlord_id, status);
 CREATE INDEX idx_visit_expiry ON visit_requests(expires_at) WHERE status = 'pending';
+
+-- Not in the original DDL above — added 2026-09-18 after demo feedback: a
+-- lighter-weight "I'm interested" signal than requesting a visit (no
+-- scheduling), letting the landlord create a tenancy for an interested
+-- tenant with one click instead of pasting their user id into the
+-- existing POST /tenancies form (both paths coexist). Lives alongside
+-- visit_requests in this same module for the same reasons that table
+-- does: a tenant-initiated, unit-scoped signal ahead of a tenancy
+-- existing, with the same denormalized landlord_id for inbox queries.
+CREATE TABLE unit_interests (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    unit_id             UUID NOT NULL,                   -- references units.id
+    tenant_id           UUID NOT NULL,                   -- references users.id
+    landlord_id         UUID NOT NULL,                   -- denormalized for fast landlord-side queries
+    status              VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'pending' | 'converted'
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (unit_id, tenant_id) -- one open interest per tenant per unit; re-expressing is idempotent
+);
+CREATE INDEX idx_unit_interest_landlord_status ON unit_interests(landlord_id, status);
 ```
+
+`units.quantity` from the demo request that prompted the table above is deliberately **not** a
+column anywhere — "add 50 units at once" is a `POST /properties/{id}/units` request-time
+convenience (`quantity` in the request body, see api-specification.md Section 4) that creates
+that many ordinary, independent `units` rows; there's nothing to persist beyond the rows
+themselves.
 
 **Key endpoints**
 | Method | Path | Purpose |
@@ -292,8 +327,8 @@ CREATE INDEX idx_visit_expiry ON visit_requests(expires_at) WHERE status = 'pend
 | PATCH | `/visit-requests/{id}/respond` | Landlord accepts/declines/reschedules |
 | GET | `/landlords/me/visit-requests?status=pending` | Landlord inbox |
 
-**Events published:** `visit_request.created`, `visit_request.responded`, `visit_request.expired`
-**Events consumed:** none directly (Notification module subscribes to this module's events, not the reverse)
+**Events published:** `visit_request.created`, `visit_request.responded`, `visit_request.expired`, `unit_interest.created` (added 2026-09-18)
+**Events consumed:** `tenancy.created` (added 2026-09-18, → mark a matching `unit_interests` row `converted`)
 
 ---
 
@@ -522,7 +557,7 @@ CREATE TABLE notification_preferences (
 | POST | `/internal/notifications/dispatch` | Internal-only: called by other modules' event handlers |
 
 **Events published:** `notification.sent`, `notification.failed`
-**Events consumed:** *(subscribes to nearly everything)* `visit_request.created`, `visit_request.responded`, `tenancy.notice_given`, `payment.confirmed`, `payment.failed`, `contract.generated`, plus its own scheduled-job triggers for rent-expiry reminders
+**Events consumed:** *(subscribes to nearly everything)* `visit_request.created`, `visit_request.responded`, `unit_interest.created` (added 2026-09-18), `tenancy.notice_given`, `payment.confirmed`, `payment.failed`, `contract.generated`, plus its own scheduled-job triggers for rent-expiry reminders
 
 > **Note:** the schema above (`notification_templates`, `notifications`, `notification_preferences`) is the single-channel version from initial design. It is **superseded** by the multi-channel schema in `notification-module-multichannel.md` (adds `whatsapp`/`email` channels, per-channel opt-in via `notification_channels`, and cost tracking) — that document is the current source of truth for this module's data model. It's kept here only so the scheduled-job logic below has full context inline.
 

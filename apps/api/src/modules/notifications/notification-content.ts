@@ -94,6 +94,11 @@ export function renderNotificationContent(
             body: `${tenant}'s rent for ${unit} is overdue since ${context.paidThroughDate}. This is informational only.`,
           };
 
+    case 'unit_interest.created':
+      return locale === 'fr'
+        ? { body: `${tenant} s'est montré intéressé par ${unit}.` }
+        : { body: `${tenant} expressed interest in ${unit}.` };
+
     case 'visit_request.created':
       return locale === 'fr'
         ? { body: `Nouvelle demande de visite pour ${unit} de la part de ${tenant}.` }

@@ -4,20 +4,23 @@ import { VisitsService } from './visits.service';
 function buildPrismaMock() {
   return {
     visitRequest: { create: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn() },
+    unitInterest: { create: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), updateMany: jest.fn() },
   };
 }
 
 describe('VisitsService', () => {
   let prisma: ReturnType<typeof buildPrismaMock>;
-  let units: { getUnitOwnership: jest.Mock };
+  let units: { getUnitOwnership: jest.Mock; getContractDetails: jest.Mock };
+  let usersService: { getPublicProfile: jest.Mock };
   let events: { emit: jest.Mock };
   let service: VisitsService;
 
   beforeEach(() => {
     prisma = buildPrismaMock();
-    units = { getUnitOwnership: jest.fn() };
+    units = { getUnitOwnership: jest.fn(), getContractDetails: jest.fn() };
+    usersService = { getPublicProfile: jest.fn() };
     events = { emit: jest.fn() };
-    service = new VisitsService(prisma as never, units as never, events as never);
+    service = new VisitsService(prisma as never, units as never, usersService as never, events as never);
   });
 
   describe('createVisitRequest', () => {
@@ -123,6 +126,99 @@ describe('VisitsService', () => {
         'visit_request.responded',
         expect.objectContaining({ action: 'accept', status: 'accepted' }),
       );
+    });
+  });
+
+  describe('expressInterest', () => {
+    it('creates a new interest and emits unit_interest.created when none exists yet', async () => {
+      prisma.unitInterest.findUnique.mockResolvedValue(null);
+      units.getUnitOwnership.mockResolvedValue({ id: 'unit-1', propertyId: 'prop-1', landlordId: 'landlord-1' });
+      prisma.unitInterest.create.mockResolvedValue({
+        id: 'interest-1',
+        unitId: 'unit-1',
+        tenantId: 'tenant-1',
+        landlordId: 'landlord-1',
+        status: 'pending',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = await service.expressInterest('tenant-1', 'unit-1');
+
+      expect(prisma.unitInterest.create).toHaveBeenCalledWith({
+        data: { unitId: 'unit-1', tenantId: 'tenant-1', landlordId: 'landlord-1' },
+      });
+      expect(events.emit).toHaveBeenCalledWith(
+        'unit_interest.created',
+        expect.objectContaining({ unitId: 'unit-1', tenantId: 'tenant-1', landlordId: 'landlord-1' }),
+      );
+      expect(result.status).toBe('pending');
+    });
+
+    it('is idempotent: a second call for the same unit+tenant returns the existing row without creating a duplicate', async () => {
+      prisma.unitInterest.findUnique.mockResolvedValue({
+        id: 'interest-1',
+        unitId: 'unit-1',
+        tenantId: 'tenant-1',
+        landlordId: 'landlord-1',
+        status: 'pending',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = await service.expressInterest('tenant-1', 'unit-1');
+
+      expect(prisma.unitInterest.create).not.toHaveBeenCalled();
+      expect(events.emit).not.toHaveBeenCalled();
+      expect(result.id).toBe('interest-1');
+    });
+  });
+
+  describe('listInterestsForLandlord', () => {
+    it('enriches each interest with tenant contact info and the unit label', async () => {
+      prisma.unitInterest.findMany.mockResolvedValue([
+        {
+          id: 'interest-1',
+          unitId: 'unit-1',
+          tenantId: 'tenant-1',
+          landlordId: 'landlord-1',
+          status: 'pending',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ]);
+      usersService.getPublicProfile.mockResolvedValue({
+        id: 'tenant-1',
+        fullName: 'Jean Tenant',
+        phoneNumber: '+237600000000',
+        locale: 'fr',
+      });
+      units.getContractDetails.mockResolvedValue({ label: 'Studio A', addressLine: '1 Rue Test', city: 'Douala' });
+
+      const result = await service.listInterestsForLandlord('landlord-1', {});
+
+      expect(result.results[0]).toMatchObject({
+        id: 'interest-1',
+        tenant_name: 'Jean Tenant',
+        tenant_phone_number: '+237600000000',
+        unit_label: 'Studio A',
+      });
+    });
+  });
+
+  describe('handleTenancyCreated', () => {
+    it('marks a matching pending interest as converted', async () => {
+      await service.handleTenancyCreated({
+        tenancyId: 'tenancy-1',
+        unitId: 'unit-1',
+        tenantId: 'tenant-1',
+        landlordId: 'landlord-1',
+      });
+
+      expect(prisma.unitInterest.updateMany).toHaveBeenCalledWith({
+        where: { unitId: 'unit-1', tenantId: 'tenant-1', status: 'pending' },
+        data: { status: 'converted' },
+      });
     });
   });
 });

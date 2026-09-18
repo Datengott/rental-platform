@@ -98,7 +98,7 @@ export class UnitsService {
         },
       },
       include: {
-        property: { select: { city: true, ownershipVerifiedAt: true } },
+        property: { select: { city: true, ownershipVerifiedAt: true, propertyType: true, facilities: true } },
         photos: { orderBy: { sortOrder: 'asc' }, take: 1 },
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -113,9 +113,17 @@ export class UnitsService {
       results: page.map((unit) => ({
         id: unit.id,
         label: unit.label,
+        bedrooms: unit.bedrooms,
+        bathrooms: unit.bathrooms,
+        facilities: unit.facilities,
         rent_amount: unit.rentAmount,
         currency: unit.currency,
-        property: { city: unit.property.city, verified: unit.property.ownershipVerifiedAt !== null },
+        property: {
+          city: unit.property.city,
+          verified: unit.property.ownershipVerifiedAt !== null,
+          property_type: unit.property.propertyType,
+          facilities: unit.property.facilities,
+        },
         cover_photo_url: unit.photos[0]?.storageUrl ?? null,
       })),
       next_cursor: hasMore ? page[page.length - 1].id : null,

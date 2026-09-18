@@ -63,8 +63,32 @@ services:
       redis:
         condition: service_started
     command: npm run start:dev --workspace=apps/worker
-    # This is what runs the rent-expiry reminder scheduler, payment reconciliation job,
-    # and notification dispatch queue — see schema doc Section B.7 for the job logic.
+    # Only the visit-request expiry sweep actually lives here now — the
+    # rent-expiry reminder scheduler, payment reconciliation, and
+    # notification dispatch all run in-process inside `api` instead (see
+    # README.md's tech-stack table), so they share its own event bus.
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: development
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000/v1
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./apps/web:/app/apps/web
+      - /app/apps/web/node_modules
+      - /app/apps/web/.next
+    depends_on:
+      - api
+    command: npm run dev --workspace=apps/web
+    # Demo frontend only — no Prisma/DB access, calls the api purely over
+    # HTTP. NEXT_PUBLIC_API_URL is baked in at build/runtime for the
+    # BROWSER to reach the api, so it's the host's own localhost:3000 (the
+    # port docker-compose already publishes), not the "api" service name
+    # docker's internal network would resolve.
 
 volumes:
   postgres_data:

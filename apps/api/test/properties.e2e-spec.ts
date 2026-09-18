@@ -94,6 +94,87 @@ describe('Properties module (e2e)', () => {
     expect(me.body.roles).toEqual(expect.arrayContaining(['tenant', 'landlord']));
   });
 
+  it('accepts optional property_type and facilities, and unit facilities, echoing them back through search', async () => {
+    const session = await signUp(app, fakeSms, randomPhoneNumber());
+
+    const propertyRes = await request(app.getHttpServer())
+      .post('/v1/properties')
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({
+        address_line: '12 Rue de la Paix',
+        city: 'Douala',
+        property_type: 'residential',
+        facilities: ['gated', 'generator'],
+      })
+      .expect(201);
+    expect(propertyRes.body).toMatchObject({ property_type: 'residential', facilities: ['gated', 'generator'] });
+
+    const unitRes = await request(app.getHttpServer())
+      .post(`/v1/properties/${propertyRes.body.id}/units`)
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ bedrooms: 2, bathrooms: 1, rent_amount: 150000, facilities: ['ac', 'wifi'] })
+      .expect(201);
+    expect(unitRes.body.facilities).toEqual(['ac', 'wifi']);
+
+    await request(app.getHttpServer())
+      .post(`/v1/units/${unitRes.body.id}/photos`)
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .attach('file', Buffer.from('fake-image'), 'photo.jpg')
+      .expect(201);
+
+    const search = await request(app.getHttpServer()).get('/v1/units?city=Douala').expect(200);
+    const found = search.body.results.find((u: { id: string }) => u.id === unitRes.body.id);
+    expect(found).toMatchObject({
+      bathrooms: 1,
+      facilities: ['ac', 'wifi'],
+      property: { property_type: 'residential', facilities: ['gated', 'generator'] },
+    });
+  });
+
+  it('creates several independent units in one call when quantity is given, auto-numbering the label', async () => {
+    const session = await signUp(app, fakeSms, randomPhoneNumber());
+    const propertyRes = await request(app.getHttpServer())
+      .post('/v1/properties')
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ address_line: '12 Rue de la Paix', city: 'Douala' })
+      .expect(201);
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/properties/${propertyRes.body.id}/units`)
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ label: 'Studio', rent_amount: 100000, quantity: 3 })
+      .expect(201);
+
+    expect(res.body.units).toHaveLength(3);
+    expect(res.body.units.map((u: { label: string }) => u.label)).toEqual(['Studio #1', 'Studio #2', 'Studio #3']);
+    // Independent rows, not one row with a count — distinct ids.
+    expect(new Set(res.body.units.map((u: { id: string }) => u.id)).size).toBe(3);
+
+    const myUnits = await request(app.getHttpServer())
+      .get('/v1/landlords/me/units')
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .expect(200);
+    expect(myUnits.body).toHaveLength(3);
+  });
+
+  it('omitting quantity (or sending 1) keeps the original single-object response shape', async () => {
+    const session = await signUp(app, fakeSms, randomPhoneNumber());
+    const propertyRes = await request(app.getHttpServer())
+      .post('/v1/properties')
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ address_line: '12 Rue de la Paix', city: 'Douala' })
+      .expect(201);
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/properties/${propertyRes.body.id}/units`)
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ rent_amount: 100000, quantity: 1 })
+      .expect(201);
+
+    expect(res.body.units).toBeUndefined();
+    expect(res.body.id).toBeDefined();
+  });
+
   it('a new unit starts as draft and does not appear in search', async () => {
     const session = await signUp(app, fakeSms, randomPhoneNumber());
     const { unit } = await createPropertyWithUnit(session.access_token);

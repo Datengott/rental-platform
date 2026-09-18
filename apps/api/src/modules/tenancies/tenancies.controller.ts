@@ -26,6 +26,12 @@ export class TenanciesController {
     return this.tenanciesService.listForLandlord(user.userId);
   }
 
+  @Get('tenants/me/tenancies')
+  @ApiOperation({ summary: 'Your own tenancies (tenant side) — mirrors landlords/me/tenancies.' })
+  listMyTenanciesAsTenant(@CurrentUser() user: AuthenticatedUser) {
+    return this.tenanciesService.listForTenant(user.userId);
+  }
+
   @Get('tenancies/:id')
   @ApiOperation({ summary: 'Full tenancy detail — accessible by the landlord or the tenant.' })
   getTenancy(@CurrentUser() user: AuthenticatedUser, @Param('id', ParseUUIDPipe) tenancyId: string) {

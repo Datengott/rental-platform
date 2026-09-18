@@ -23,6 +23,8 @@ export class PropertiesService {
       data: {
         landlordId,
         name: dto.name,
+        propertyType: dto.property_type,
+        facilities: dto.facilities ?? [],
         addressLine: dto.address_line,
         city: dto.city,
         region: dto.region,
@@ -36,26 +38,47 @@ export class PropertiesService {
 
   async createUnit(landlordId: string, propertyId: string, dto: CreateUnitDto) {
     const property = await this.getOwnedProperty(landlordId, propertyId);
+    const quantity = dto.quantity ?? 1;
 
-    const unit = await this.prisma.unit.create({
-      data: {
-        propertyId,
-        label: dto.label,
-        bedrooms: dto.bedrooms,
-        bathrooms: dto.bathrooms,
-        sizeSqm: dto.size_sqm,
-        rentAmount: dto.rent_amount,
-        currency: dto.currency,
-        billingCycle: dto.billing_cycle,
-        description: dto.description,
-        // status defaults to 'draft' (prisma/schema.prisma) — the schema
-        // doc's DDL default of 'vacant' contradicts PRD Epic 2 US-2.1 AC2
-        // ("moves from draft to vacant" on first photo), so the DDL default
-        // there is a doc inconsistency; this follows the PRD.
-      },
-    });
+    const baseData = {
+      propertyId,
+      bedrooms: dto.bedrooms,
+      bathrooms: dto.bathrooms,
+      facilities: dto.facilities ?? [],
+      sizeSqm: dto.size_sqm,
+      rentAmount: dto.rent_amount,
+      currency: dto.currency,
+      billingCycle: dto.billing_cycle,
+      description: dto.description,
+      // status defaults to 'draft' (prisma/schema.prisma) — the schema
+      // doc's DDL default of 'vacant' contradicts PRD Epic 2 US-2.1 AC2
+      // ("moves from draft to vacant" on first photo), so the DDL default
+      // there is a doc inconsistency; this follows the PRD.
+    };
+    const propertySummary = { id: property.id, name: property.name, city: property.city };
 
-    return toUnitResponse({ ...unit, property: { id: property.id, name: property.name, city: property.city } });
+    if (quantity === 1) {
+      const unit = await this.prisma.unit.create({ data: { ...baseData, label: dto.label } });
+      return toUnitResponse({ ...unit, property: propertySummary });
+    }
+
+    // Bulk path (`quantity` > 1): each row is fully independent — its own
+    // id, own status/photos/tenancy lifecycle — not a count on a shared
+    // row. Only auto-numbers the label ("Studio A #1".."Studio A #N") when
+    // a base label was actually given; otherwise every row's label stays
+    // null, same as a single unit created without one. Response shape
+    // deliberately branches here (array under `units`) rather than always
+    // wrapping in an array, so every existing caller that only ever sent
+    // quantity 1 (i.e. never sent it at all) keeps getting the exact same
+    // single-object response it always has.
+    const units = await Promise.all(
+      Array.from({ length: quantity }, (_, i) =>
+        this.prisma.unit.create({
+          data: { ...baseData, label: dto.label ? `${dto.label} #${i + 1}` : undefined },
+        }),
+      ),
+    );
+    return { units: units.map((unit) => toUnitResponse({ ...unit, property: propertySummary })) };
   }
 
   // Used by UnitsService for ownership checks — Properties owns this check
@@ -74,6 +97,8 @@ export class PropertiesService {
     id: string;
     landlordId: string;
     name: string | null;
+    propertyType: string | null;
+    facilities: string[];
     addressLine: string;
     city: string;
     region: string | null;
@@ -87,6 +112,8 @@ export class PropertiesService {
       id: property.id,
       landlord_id: property.landlordId,
       name: property.name,
+      property_type: property.propertyType,
+      facilities: property.facilities,
       address_line: property.addressLine,
       city: property.city,
       region: property.region,

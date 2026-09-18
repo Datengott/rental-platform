@@ -64,5 +64,35 @@ describe('PropertiesService', () => {
         service.createUnit('user-1', 'missing-prop', { rent_amount: 100000 }),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    it('creates `quantity` independent units and returns them under `units`, auto-numbering the label', async () => {
+      prisma.property.findUnique.mockResolvedValue({ id: 'prop-1', landlordId: 'user-1', name: null, city: 'Douala' });
+      let nextId = 1;
+      prisma.unit.create.mockImplementation(({ data }: { data: { label?: string } }) =>
+        Promise.resolve({ id: `unit-${nextId++}`, ...data, status: 'draft' }),
+      );
+
+      const result = await service.createUnit('user-1', 'prop-1', {
+        label: 'Studio',
+        rent_amount: 100000,
+        quantity: 3,
+      });
+
+      expect(prisma.unit.create).toHaveBeenCalledTimes(3);
+      const units = (result as { units: { label: string | null }[] }).units;
+      expect(units).toHaveLength(3);
+      expect(units.map((u) => u.label)).toEqual(['Studio #1', 'Studio #2', 'Studio #3']);
+    });
+
+    it('keeps the single-object response shape when quantity is 1 or omitted', async () => {
+      prisma.property.findUnique.mockResolvedValue({ id: 'prop-1', landlordId: 'user-1', name: null, city: 'Douala' });
+      prisma.unit.create.mockResolvedValue({ id: 'unit-1', label: null, status: 'draft' });
+
+      const result = await service.createUnit('user-1', 'prop-1', { rent_amount: 100000 });
+
+      expect(prisma.unit.create).toHaveBeenCalledTimes(1);
+      expect(result).not.toHaveProperty('units');
+      expect(result.id).toBe('unit-1');
+    });
   });
 });

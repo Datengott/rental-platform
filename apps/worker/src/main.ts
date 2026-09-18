@@ -13,13 +13,12 @@ async function verifyConnections() {
   console.log('[worker] Database and Redis connections verified.');
 }
 
-// Placeholder for the daily rent-expiry reminder scan described in
-// docs/deployment-infrastructure-and-module-schemas.md Section B.7.
-// Real implementation lands once the tenancies + notifications modules exist —
-// this just proves the worker container runs on a schedule correctly.
-cron.schedule('0 7 * * *', async () => {
-  console.log('[worker] rent_expiry_reminder_scan would run now (not yet implemented).');
-});
+// The rent-expiry reminder scan described in
+// docs/deployment-infrastructure-and-module-schemas.md Section B.7 ended up
+// living in apps/api instead (NotificationsService, @nestjs/schedule) —
+// see README.md's tech-stack table — so it shares the api's own in-process
+// event bus rather than needing cross-process plumbing. Nothing runs here
+// for it; this comment is just the pointer for anyone looking for it.
 
 // Visits module (Section B.3) — PRD Epic 3 US-3.1 AC2: a pending visit
 // request auto-expires 48h after creation. The api's VisitsService also
@@ -27,11 +26,12 @@ cron.schedule('0 7 * * *', async () => {
 // correctness never depends on this sweep's interval — this just catches
 // requests nobody ever acted on.
 //
-// "the tenant is notified" (same AC) isn't implemented: this process has no
-// event bus shared with the api (EventEmitter2 is in-process only), and the
-// Notifications module doesn't exist yet. Once it does, this should publish
-// visit_request.expired for each row — via an outbox table or Redis pub/sub,
-// not a direct HTTP call back into the api.
+// "the tenant is notified" (same AC) still isn't implemented, even though
+// the Notifications module now exists: this process has no event bus
+// shared with the api (EventEmitter2 is in-process only). Wiring this up
+// would need an outbox table or Redis pub/sub publishing
+// visit_request.expired for each row — not a direct HTTP call back into
+// the api — and hasn't been built. See README.md's Visits entry.
 cron.schedule('*/15 * * * *', async () => {
   const { count } = await prisma.visitRequest.updateMany({
     where: { status: 'pending', expiresAt: { lt: new Date() } },

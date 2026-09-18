@@ -139,6 +139,15 @@ describe('Contracts module (e2e)', () => {
       .set('Authorization', `Bearer ${tenant.access_token}`)
       .expect(200);
     expect(asTenant.body.status).toBe('draft');
+
+    // GET /tenancies/{id} already surfaced contract_status — the landlord's
+    // own occupancy dashboard (GET /landlords/me/tenancies) is a separate
+    // code path and had been missing it entirely until this was caught live.
+    const dashboardRes = await request(app.getHttpServer())
+      .get('/v1/landlords/me/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(dashboardRes.body.find((t: { id: string }) => t.id === tenancyId)).toMatchObject({ contract_status: 'draft' });
   });
 
   it("defaults the locale to the requester's own stored locale when omitted", async () => {

@@ -59,8 +59,13 @@ tested; unchecked = not started or schema-only.
       (first photo moves a unit `draft → vacant`, per PRD Epic 2 US-2.1 AC2), public
       search, landlord's own inventory, and a manual `vacant ↔ reserved` status
       transition (everything else is system-driven, pending Visits/Tenancies).
-      Covered by `properties.service.spec.ts`/`units.service.spec.ts` (mocked) and
-      `apps/api/test/properties.e2e-spec.ts` (real Postgres).
+      `POST /properties/{id}/units` also takes an optional `quantity` (added
+      2026-09-18, demo feedback) to bulk-create that many independent units in one
+      call — each its own row/id/lifecycle, not a count field — returning
+      `{ units: [...] }` instead of a single object only when `quantity > 1`, so
+      every existing caller (which never sends it) keeps the exact response shape
+      it always got. Covered by `properties.service.spec.ts`/`units.service.spec.ts`
+      (mocked) and `apps/api/test/properties.e2e-spec.ts` (real Postgres).
 - [x] **Visits** — tenant requests a visit (+48h expiry), landlord accepts/declines/
       proposes an alternate time, landlord inbox with status filtering. Expiry is
       enforced twice: lazily on the single-record respond path (so cron lag can never
@@ -75,8 +80,26 @@ tested; unchecked = not started or schema-only.
       multichannel doc's own routing table (Section 4) also has no entry for
       `visit_request.expired` specifically. `visit_request.created`/`.responded`
       (handled entirely within the api process) ARE wired — see Notifications
-      below. Covered by `visits.service.spec.ts` (mocked) and
-      `apps/api/test/visits.e2e-spec.ts` (real Postgres).
+      below.
+
+      **Unit interest** (added 2026-09-18, demo feedback) — a lighter-weight
+      alternative to requesting a visit: `POST /units/{id}/interest` (tenant, no
+      body, idempotent per (unit, tenant) pair) and `GET /landlords/me/interests`
+      (landlord inbox, each row enriched with the tenant's name/phone and the
+      unit's label). Lets a landlord create a tenancy for an interested tenant with
+      one click — an *alternative* path alongside the existing paste-the-tenant-id
+      `POST /tenancies` form, not a replacement for it; both create a tenancy
+      through the same endpoint. A `unit_interests` row flips from `pending` to
+      `converted` automatically via a `tenancy.created` listener (this module's own
+      reaction to Tenancies' event, not a direct read of its tables), regardless of
+      which of the two paths actually created the tenancy. `unit_interest.created`
+      notifies the landlord the same way `visit_request.created` does — routed by
+      the same "structurally identical, and the doc predates this event" reasoning
+      already used for `complaint.created`.
+
+      Covered by `visits.service.spec.ts` (mocked) and
+      `apps/api/test/visits.e2e-spec.ts` (real Postgres, including the interest →
+      tenancy → converted round trip).
 - [x] **Tenancies** — create tenancy on a vacant unit (rejects non-vacant units and a
       notice_period_days below the confirmed 90-day statutory floor), reminder-setting
       updates, termination notices (validates `effective_date` against the floor and
@@ -218,6 +241,51 @@ tested; unchecked = not started or schema-only.
       (mocked) and `apps/api/test/complaints.e2e-spec.ts` (real Postgres,
       including the fan-out to the landlord and the status-change notification
       to the tenant).
+- [x] **Web frontend** (`apps/web/`) — a lightweight Next.js (App Router) app, a
+      separate deployable service in this same monorepo, built specifically to let
+      a stakeholder demo run in a browser against the real API rather than curl/
+      Swagger. No UI framework/component library — hand-written CSS with a small
+      set of utility classes, and no client-side dependency beyond React/Next
+      itself, per the "as lightweight as possible" direction. Covers: OTP login,
+      landlord property/unit/photo/tenancy creation, the landlord occupancy
+      dashboard (units, tenancies with balance/paid-through/contract status,
+      visit-request inbox, complaints inbox), and the tenant side (browse public
+      units, request a visit, pay rent, generate a contract, file a complaint).
+      Session storage is `localStorage` — a deliberate demo simplification
+      (disclosed in `lib/api.ts`); a production build would use httpOnly cookies
+      instead. Two real gaps this UI work caught live and fixed on the backend:
+      `GET /landlords/me/tenancies` was missing `contract_status` (only
+      `GET /tenancies/{id}` had it), and there was no tenant-facing "my
+      tenancies" endpoint at all (`GET /tenants/me/tenancies`, added 2026-09-18,
+      mirrors the landlord one) — before that, a tenant could only find their own
+      tenancy by having the id read out to them.
+
+      Added 2026-09-18, after a stakeholder-demo pass surfaced further product
+      feedback:
+      - **Property/unit detail**: `property_type` (`residential`/`commercial`/
+        `mixed_use`) and freeform `facilities` tags (gated compound, generator,
+        borehole, security personnel, ...) on properties; freeform `facilities`
+        tags (AC, Wi-Fi, hot water, furnished, ...) on units, alongside the
+        already-existing `bedrooms`/`bathrooms`. Both are optional columns with
+        empty/`null` defaults, so every row created before this migration stays
+        valid — see the schema doc's B.2 section for the added-column note.
+      - **Landlord-set advance-payment cap**: `max_advance_months` already existed
+        end-to-end on the backend (`api-specification.md` Section 6) but had no
+        field in the tenancy-creation form — added there, and the tenancy list now
+        shows it.
+      - **Multi-month rent payment**: the tenant's "pay rent" action is now a
+        cycle-count selector (1..that tenancy's `max_advance_months`, in units of
+        its own `billing_cycle`), not a single hardcoded month — the amount and
+        period sent to `POST /tenancies/{id}/payments` scale accordingly, still
+        landing on the whole-calendar-month boundaries `PaymentsService.
+        expectedAmountFor()` requires. A new `months_paid_ahead` field on the
+        tenancy response (both landlord and tenant views) surfaces "how many
+        months ahead is this tenant paid" without either side doing the date math
+        themselves — a simple whole-month count against today, not a billing
+        calculation in its own right.
+      - Visual polish: a small stats row on the landlord dashboard (unit/occupied/
+        pending-visit/open-complaint counts), chip-style facility pickers, and tag/
+        badge styling for the values above.
 - [ ] **Admin** — thin wrappers over other modules' APIs + audit log
 
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
@@ -317,7 +385,10 @@ GCP Cloud Run + Cloudflare R2 deployment design and CI/CD pipeline. The deploy s
 ```
 apps/
   api/           NestJS application — one module folder per bounded module
-  worker/        Background jobs: rent-expiry scheduler, payment reconciliation, notification dispatch
+  worker/        Background jobs that need a separate process: visit-request expiry sweep, DB/Redis
+                 startup checks. Rent-expiry reminders, payment reconciliation, and notification
+                 dispatch all run in-process inside the api instead (they share its event bus).
+  web/           Next.js demo frontend — a separate deployable service, calling the api over HTTP
 prisma/
   schema.prisma  Database schema — Auth, Properties, Visits, Tenancies, Payments modeled and implemented
 docs/            Full product/technical specification (PRD, API spec, architecture, schemas)

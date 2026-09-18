@@ -1,18 +1,23 @@
 import { HttpStatus, Injectable, NotFoundException } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
-import { VisitRequestStatus } from '@prisma/client';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
+import { UnitInterestStatus, VisitRequestStatus } from '@prisma/client';
 import { ApiException } from '../../common/exceptions/api.exception';
 import {
+  UNIT_INTEREST_CREATED,
   VISIT_REQUEST_CREATED,
   VISIT_REQUEST_RESPONDED,
+  UnitInterestCreatedEvent,
   VisitRequestCreatedEvent,
   VisitRequestRespondedEvent,
 } from '../../common/events/visit-request.events';
+import { TENANCY_CREATED, TenancyCreatedEvent } from '../../common/events/tenancy.events';
 import { PrismaService } from '../../common/prisma.service';
 import { UnitsService } from '../properties/units.service';
+import { UsersService } from '../auth/users.service';
 import { CreateVisitRequestDto } from './dto/create-visit-request.dto';
 import { RespondVisitRequestDto } from './dto/respond-visit-request.dto';
 import { ListVisitRequestsDto } from './dto/list-visit-requests.dto';
+import { ListUnitInterestsDto } from './dto/list-unit-interests.dto';
 
 // Not in .env.example — api-specification.md Section 5 gives this as a
 // literal example ("+48h"), and PRD Epic 3 US-3.1 AC2 states it as the
@@ -24,6 +29,7 @@ export class VisitsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly units: UnitsService,
+    private readonly usersService: UsersService,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -100,6 +106,106 @@ export class VisitsService {
     return {
       results: page.map((r) => this.toResponse(r)),
       next_cursor: hasMore ? page[page.length - 1].id : null,
+    };
+  }
+
+  // Lighter-weight than a visit request — no scheduling involved, just "I
+  // want this unit." Idempotent: expressing interest again on the same
+  // unit returns the existing row rather than erroring or duplicating, so
+  // a tenant double-clicking the button (or the frontend re-rendering)
+  // never creates a second row for the same (unit, tenant) pair.
+  async expressInterest(tenantId: string, unitId: string) {
+    const existing = await this.prisma.unitInterest.findUnique({
+      where: { unitId_tenantId: { unitId, tenantId } },
+    });
+    if (existing) {
+      return this.toInterestResponse(existing);
+    }
+
+    const unit = await this.units.getUnitOwnership(unitId);
+
+    const interest = await this.prisma.unitInterest.create({
+      data: { unitId, tenantId, landlordId: unit.landlordId },
+    });
+
+    this.events.emit(UNIT_INTEREST_CREATED, {
+      unitInterestId: interest.id,
+      unitId,
+      tenantId,
+      landlordId: unit.landlordId,
+    } satisfies UnitInterestCreatedEvent);
+
+    return this.toInterestResponse(interest);
+  }
+
+  async listInterestsForLandlord(landlordId: string, query: ListUnitInterestsDto) {
+    const limit = query.limit ?? 20;
+
+    const interests = await this.prisma.unitInterest.findMany({
+      where: { landlordId, status: query.status },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = interests.length > limit;
+    const page = hasMore ? interests.slice(0, limit) : interests;
+
+    // Enriched with tenant contact + unit label so the landlord can act on
+    // "who's interested in what" from this list alone, without a separate
+    // lookup for each row — the whole point of the "one-click" flow.
+    const results = await Promise.all(
+      page.map(async (i) => {
+        const [tenant, unit] = await Promise.all([
+          this.usersService.getPublicProfile(i.tenantId),
+          this.units.getContractDetails(i.unitId),
+        ]);
+        return {
+          ...this.toInterestResponse(i),
+          tenant_name: tenant.fullName,
+          tenant_phone_number: tenant.phoneNumber,
+          unit_label: unit.label,
+        };
+      }),
+    );
+
+    return {
+      results,
+      next_cursor: hasMore ? page[page.length - 1].id : null,
+    };
+  }
+
+  // tenancy.created -> mark any matching interest 'converted', regardless
+  // of whether the tenancy was actually created from the landlord's
+  // "Create tenancy" button on the interest list or via the plain
+  // paste-the-tenant-id form (both are valid paths per the product
+  // request — this listener doesn't care which one was used). A no-op
+  // (updateMany matches zero rows) when no interest exists for that pair.
+  @OnEvent(TENANCY_CREATED)
+  async handleTenancyCreated(event: TenancyCreatedEvent): Promise<void> {
+    await this.prisma.unitInterest.updateMany({
+      where: { unitId: event.unitId, tenantId: event.tenantId, status: UnitInterestStatus.pending },
+      data: { status: UnitInterestStatus.converted },
+    });
+  }
+
+  private toInterestResponse(interest: {
+    id: string;
+    unitId: string;
+    tenantId: string;
+    landlordId: string;
+    status: string;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return {
+      id: interest.id,
+      unit_id: interest.unitId,
+      tenant_id: interest.tenantId,
+      landlord_id: interest.landlordId,
+      status: interest.status,
+      created_at: interest.createdAt,
+      updated_at: interest.updatedAt,
     };
   }
 

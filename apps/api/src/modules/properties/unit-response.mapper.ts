@@ -7,6 +7,7 @@ export interface UnitWithPropertySummary {
   label: string | null;
   bedrooms: number | null;
   bathrooms: number | null;
+  facilities: string[];
   sizeSqm: unknown;
   rentAmount: unknown;
   currency: string;
@@ -25,6 +26,7 @@ export function toUnitResponse(unit: UnitWithPropertySummary) {
     label: unit.label,
     bedrooms: unit.bedrooms,
     bathrooms: unit.bathrooms,
+    facilities: unit.facilities,
     size_sqm: unit.sizeSqm,
     rent_amount: unit.rentAmount,
     currency: unit.currency,

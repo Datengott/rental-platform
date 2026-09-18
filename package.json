@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "apps/api",
-    "apps/worker"
+    "apps/worker",
+    "apps/web"
   ],
   "scripts": {
     "postinstall": "prisma generate",

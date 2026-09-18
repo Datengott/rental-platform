@@ -94,6 +94,16 @@ export const ROUTING_TABLE: Record<string, RoutingRule> = {
   // Section 4 table has no entry for it, and it fires from apps/worker — a
   // separate process from this module's in-process event bus — so there's
   // no event to subscribe to yet regardless. See README.md's Visits entry.
+
+  // unit_interest.created doesn't exist in the multichannel doc either —
+  // added 2026-09-18, after Visits' own module existed. Routed by the same
+  // analogy already used for complaint.created: tenant-initiated,
+  // landlord needs to know, structurally identical to visit_request.created.
+  'unit_interest.created': {
+    pattern: 'waterfall',
+    channels: ['push', 'whatsapp', 'sms'],
+    recipients: 'landlord',
+  },
 };
 
 // Meta requires WhatsApp sends to reference a pre-approved template name
@@ -109,4 +119,5 @@ export const WHATSAPP_TEMPLATE_INFO: Record<string, { templateName: string; cate
   [RENT_EXPIRY_OVERDUE]: { templateName: 'rent_overdue_v1', category: 'utility' },
   'visit_request.created': { templateName: 'visit_request_v1', category: 'utility' },
   'complaint.created': { templateName: 'complaint_created_v1', category: 'utility' },
+  'unit_interest.created': { templateName: 'unit_interest_v1', category: 'utility' },
 };

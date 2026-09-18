@@ -114,6 +114,29 @@ export class TenanciesService {
       tenancies.map(async (t) => ({
         ...this.toResponse(t),
         current_balance: await this.paymentsService.getCurrentBalance(t.id),
+        // Same field getById() already surfaces — the occupancy dashboard
+        // (this list) needs contract status just as much as the detail
+        // view does. Missing here was a real gap the web demo caught live.
+        contract_status: await this.contractsService.getLatestStatusForTenancy(t.id),
+      })),
+    );
+  }
+
+  // Mirrors listForLandlord() but scoped to the tenant side — added after
+  // live demo feedback (2026-09-18): api-specification.md never defined a
+  // tenant-facing "my tenancies" endpoint, so the web demo could only look
+  // a tenancy up by pasting its id. This closes that gap the same way
+  // listForLandlord() already serves the landlord's occupancy dashboard.
+  async listForTenant(tenantId: string) {
+    const tenancies = await this.prisma.tenancy.findMany({
+      where: { tenantId },
+      orderBy: { createdAt: 'desc' },
+    });
+    return Promise.all(
+      tenancies.map(async (t) => ({
+        ...this.toResponse(t),
+        current_balance: await this.paymentsService.getCurrentBalance(t.id),
+        contract_status: await this.contractsService.getLatestStatusForTenancy(t.id),
       })),
     );
   }
@@ -382,6 +405,17 @@ export class TenanciesService {
     return tenancy;
   }
 
+  private monthsPaidAhead(paidThroughDate: Date | null): number {
+    if (!paidThroughDate) return 0;
+    const today = new Date();
+    const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+    if (paidThroughDate <= todayUtc) return 0;
+    const months =
+      (paidThroughDate.getUTCFullYear() - todayUtc.getUTCFullYear()) * 12 +
+      (paidThroughDate.getUTCMonth() - todayUtc.getUTCMonth());
+    return Math.max(0, months);
+  }
+
   private toResponse(tenancy: {
     id: string;
     unitId: string;
@@ -412,6 +446,14 @@ export class TenanciesService {
       notice_period_days: tenancy.noticePeriodDays,
       max_advance_months: tenancy.maxAdvanceMonths,
       paid_through_date: tenancy.paidThroughDate ? tenancy.paidThroughDate.toISOString().slice(0, 10) : null,
+      // How many whole calendar months of rent this tenancy is currently
+      // paid ahead of today — landlord-visible "how far ahead has this
+      // tenant paid" indicator requested after the live demo (2026-09-18).
+      // Deliberately a simple whole-month count, not tied to billing_cycle,
+      // since it's a demo convenience field, not a billing calculation
+      // (expectedAmountFor in PaymentsService remains the source of truth
+      // for what a payment must actually cover).
+      months_paid_ahead: this.monthsPaidAhead(tenancy.paidThroughDate),
       reminder_first_days_before: tenancy.reminderFirstDaysBefore,
       reminder_second_days_before: tenancy.reminderSecondDaysBefore,
       status: tenancy.status,

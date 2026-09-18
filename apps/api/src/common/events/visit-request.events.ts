@@ -27,3 +27,17 @@ export interface VisitRequestExpiredEvent {
   tenantId: string;
   landlordId: string;
 }
+
+// UnitInterest lives in the Visits module too (see the comment on the
+// model in schema.prisma) — added 2026-09-18, not in the original schema
+// doc's Section B.3. TENANCY_CREATED (Tenancies' own event) is consumed
+// here to mark a matching interest 'converted'; nothing here is consumed
+// by Tenancies — the dependency runs one way.
+export const UNIT_INTEREST_CREATED = 'unit_interest.created';
+
+export interface UnitInterestCreatedEvent {
+  unitInterestId: string;
+  unitId: string;
+  tenantId: string;
+  landlordId: string;
+}

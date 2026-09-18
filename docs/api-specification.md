@@ -107,15 +107,19 @@ Partial update (`full_name`, `locale`).
 ### `POST /properties` *(landlord)*
 ```json
 // Request
-{ "name": "Résidence Bonapriso", "address_line": "...", "city": "Douala", "region": "Littoral", "latitude": 4.05, "longitude": 9.7 }
+{ "name": "Résidence Bonapriso", "property_type": "residential", "facilities": ["gated", "generator", "borehole", "security_personnel"],
+  "address_line": "...", "city": "Douala", "region": "Littoral", "latitude": 4.05, "longitude": 9.7 }
 // Response 201 → property object with id, ownership_verified_at: null
 ```
+`property_type` (`residential`|`commercial`|`mixed_use`) and `facilities` (freeform string tags) are both optional — added 2026-09-18 after live demo feedback; every property created before that date just has them as `null`/`[]`.
 
 ### `POST /properties/{id}/units`
 ```json
-{ "label": "Unit 4B", "bedrooms": 2, "bathrooms": 1, "size_sqm": 65, "rent_amount": 150000, "currency": "XAF", "billing_cycle": "monthly", "description": "..." }
+{ "label": "Unit 4B", "bedrooms": 2, "bathrooms": 1, "facilities": ["ac", "wifi", "hot_water"], "size_sqm": 65, "rent_amount": 150000, "currency": "XAF", "billing_cycle": "monthly", "description": "..." }
 ```
-Response includes `status: "draft"` until at least one photo is attached (Epic 2, US-2.1 AC2).
+Response includes `status: "draft"` until at least one photo is attached (Epic 2, US-2.1 AC2). `facilities` is the same freeform-tags pattern as the property's, added 2026-09-18.
+
+An optional `quantity` (1-100, added 2026-09-18) bulk-creates that many **independent** units in one call — e.g. 50 identical studio units in the same building, instead of submitting this form 50 times. Each created unit gets its own id/status/photos/tenancy lifecycle; `quantity` is a creation-time convenience, not a count stored anywhere. Response shape branches on it: omitted or `1` returns the single unit object shown above (unchanged, so every existing caller keeps working); `quantity > 1` returns `{ "units": [ ...N unit objects... ] }` instead. When a `label` is given alongside `quantity > 1`, each unit's label is auto-numbered (`"Studio #1"`, `"Studio #2"`, ...); omitted, every created unit's `label` is `null`, same as a single unit created without one.
 
 ### `POST /units/{id}/photos`
 `multipart/form-data`: `file`, `geo_latitude`, `geo_longitude`, `captured_at`. Returns photo object; first successful upload transitions unit `draft → vacant`.
@@ -125,8 +129,8 @@ Public search. Query params: `city`, `region`, `min_price`, `max_price`, `bedroo
 ```json
 {
   "results": [
-    { "id": "uuid", "label": "Unit 4B", "rent_amount": 150000, "currency": "XAF",
-      "property": { "city": "Douala", "verified": true }, "cover_photo_url": "..." }
+    { "id": "uuid", "label": "Unit 4B", "bedrooms": 2, "bathrooms": 1, "facilities": ["ac", "wifi"], "rent_amount": 150000, "currency": "XAF",
+      "property": { "city": "Douala", "verified": true, "property_type": "residential", "facilities": ["gated"] }, "cover_photo_url": "..." }
   ],
   "next_cursor": null
 }
@@ -160,6 +164,37 @@ Update mutable fields (`rent_amount`, `description`, `status` where the transiti
 ### `GET /landlords/me/visit-requests?status=pending`
 List with pagination.
 
+### `POST /units/{id}/interest` *(tenant)*
+Added 2026-09-18 after demo feedback: a lighter-weight signal than requesting a visit — no
+scheduling, just "I'm interested in this unit." No request body. `201` → the interest object
+(`id`, `unit_id`, `tenant_id`, `landlord_id`, `status: "pending"`, `created_at`, `updated_at`).
+Idempotent: calling it again for the same unit as the same tenant returns the same existing
+row rather than erroring or creating a duplicate (a tenant re-clicking the button, or the
+frontend re-rendering, is harmless). Notifies the landlord the same way `visit_request.created`
+does (waterfall: push → whatsapp → sms).
+
+### `GET /landlords/me/interests?status=pending`
+Added 2026-09-18. Landlord inbox of tenants who expressed interest in any of their units —
+this is what the "add tenancy by the click of a button, for any interested tenant" flow reads
+from, as an alternative to the existing paste-the-tenant-id `POST /tenancies` form (both paths
+create a tenancy through the same endpoint; this just removes the copy/paste step for a tenant
+who already raised their hand). Each result is enriched beyond the bare interest row with
+`tenant_name`, `tenant_phone_number`, and `unit_label`, so the landlord can act on the list
+without a separate lookup per row:
+```json
+{
+  "results": [
+    { "id": "uuid", "unit_id": "uuid", "tenant_id": "uuid", "landlord_id": "uuid",
+      "status": "pending", "tenant_name": "Jean Dupont", "tenant_phone_number": "+237699500001",
+      "unit_label": "Studio A", "created_at": "...", "updated_at": "..." }
+  ],
+  "next_cursor": null
+}
+```
+`status` is `pending` until a tenancy is created for that same `(unit_id, tenant_id)` pair
+(through either path above), at which point it flips to `converted` automatically — there is
+no manual "dismiss"/"convert" action on this resource itself.
+
 ---
 
 ## 6. Tenancy & Occupancy
@@ -182,7 +217,10 @@ List with pagination.
 Adjusts reminder timing for an existing tenancy without needing to touch any other field.
 
 ### `GET /landlords/me/tenancies`
-Occupancy dashboard data source — includes `current_balance` (derived from the ledger, not stored redundantly on the tenancy record itself) **and** `paid_through_date`, which is what the dashboard uses to visually flag units approaching expiry (e.g., amber/red badge) independent of whether a reminder notification has fired yet.
+Occupancy dashboard data source — includes `current_balance` (derived from the ledger, not stored redundantly on the tenancy record itself) **and** `paid_through_date`, which is what the dashboard uses to visually flag units approaching expiry (e.g., amber/red badge) independent of whether a reminder notification has fired yet. Also includes `months_paid_ahead` (added 2026-09-18) — a simple whole-calendar-month count of how far `paid_through_date` sits ahead of today, so the landlord can see at a glance how many months a tenant has paid for without doing the date math themselves.
+
+### `GET /tenants/me/tenancies` *(tenant)*
+Added 2026-09-18 after live demo feedback — the tenant-side mirror of `GET /landlords/me/tenancies` above (same response shape, scoped to the requester's own tenancies as tenant instead of as landlord). Closes the gap where a tenant previously had no way to discover their own tenancies except being told the id out-of-band.
 
 ### `GET /tenancies/{id}`
 Full detail including `paid_through_date`, reminder settings, linked contract status, and last 5 ledger entries (full ledger via `/tenancies/{id}/ledger`).

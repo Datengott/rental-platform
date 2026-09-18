@@ -2,7 +2,7 @@
   "name": "@rental-platform/worker",
   "version": "0.1.0",
   "private": true,
-  "description": "Background jobs: rent-expiry reminder scheduler, payment reconciliation, notification dispatch queue",
+  "description": "Background jobs: visit-request expiry sweep. The rent-expiry reminder scheduler, payment reconciliation, and notification dispatch all ended up running in-process inside apps/api instead (see README.md) so they share its event bus — this process only has the one sweep left.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",

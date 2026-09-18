@@ -19,8 +19,10 @@ import {
   PaymentFailedEvent,
 } from '../../common/events/payment.events';
 import {
+  UNIT_INTEREST_CREATED,
   VISIT_REQUEST_CREATED,
   VISIT_REQUEST_RESPONDED,
+  UnitInterestCreatedEvent,
   VisitRequestCreatedEvent,
   VisitRequestRespondedEvent,
 } from '../../common/events/visit-request.events';
@@ -328,6 +330,22 @@ export class NotificationsService {
   async onVisitRequestResponded(event: VisitRequestRespondedEvent): Promise<void> {
     const tenant = await this.usersService.getPublicProfile(event.tenantId);
     await this.dispatch(event.tenantId, VISIT_REQUEST_RESPONDED, { visitAction: event.action }, null, toLocale(tenant.locale));
+  }
+
+  @OnEvent(UNIT_INTEREST_CREATED)
+  async onUnitInterestCreated(event: UnitInterestCreatedEvent): Promise<void> {
+    const [tenant, unit, landlord] = await Promise.all([
+      this.usersService.getPublicProfile(event.tenantId),
+      this.unitsService.getContractDetails(event.unitId),
+      this.usersService.getPublicProfile(event.landlordId),
+    ]);
+    await this.dispatch(
+      event.landlordId,
+      UNIT_INTEREST_CREATED,
+      { tenantName: tenant.fullName ?? tenant.phoneNumber, unitLabel: unit.label ?? undefined },
+      null,
+      toLocale(landlord.locale),
+    );
   }
 
   @OnEvent(COMPLAINT_CREATED)

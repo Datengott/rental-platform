@@ -4,6 +4,7 @@ import { VisitsService } from './visits.service';
 import { CreateVisitRequestDto } from './dto/create-visit-request.dto';
 import { RespondVisitRequestDto } from './dto/respond-visit-request.dto';
 import { ListVisitRequestsDto } from './dto/list-visit-requests.dto';
+import { ListUnitInterestsDto } from './dto/list-unit-interests.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, AuthenticatedUser } from '../auth/decorators/current-user.decorator';
 
@@ -38,5 +39,17 @@ export class VisitsController {
   @ApiOperation({ summary: "Landlord inbox — your properties' visit requests." })
   listMyVisitRequests(@CurrentUser() user: AuthenticatedUser, @Query() query: ListVisitRequestsDto) {
     return this.visitsService.listForLandlord(user.userId, query);
+  }
+
+  @Post('units/:id/interest')
+  @ApiOperation({ summary: 'Express interest in a unit — lighter-weight than requesting a visit, no scheduling.' })
+  expressInterest(@CurrentUser() user: AuthenticatedUser, @Param('id', ParseUUIDPipe) unitId: string) {
+    return this.visitsService.expressInterest(user.userId, unitId);
+  }
+
+  @Get('landlords/me/interests')
+  @ApiOperation({ summary: 'Landlord inbox — tenants who expressed interest in your units.' })
+  listMyInterests(@CurrentUser() user: AuthenticatedUser, @Query() query: ListUnitInterestsDto) {
+    return this.visitsService.listInterestsForLandlord(user.userId, query);
   }
 }

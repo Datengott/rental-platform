@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ScheduleModule } from '@nestjs/schedule';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { PrismaModule } from '../src/common/prisma.module';
@@ -8,10 +9,15 @@ import { StorageModule } from '../src/common/storage/storage.module';
 import { AuthModule } from '../src/modules/auth/auth.module';
 import { PropertiesModule } from '../src/modules/properties/properties.module';
 import { VisitsModule } from '../src/modules/visits/visits.module';
+import { TenanciesModule } from '../src/modules/tenancies/tenancies.module';
+import { PaymentsModule } from '../src/modules/payments/payments.module';
+import { PAYMENT_GATEWAY } from '../src/modules/payments/gateway/payment-gateway';
+import { ContractsModule } from '../src/modules/contracts/contracts.module';
 import { configureApp } from '../src/setup-app';
 import { PrismaService } from '../src/common/prisma.service';
 import { SMS_GATEWAY } from '../src/modules/auth/sms/sms-gateway';
 import { FakeSmsGateway, randomPhoneNumber } from './support/fake-sms-gateway';
+import { FakePaymentGateway } from './support/fake-payment-gateway';
 import { signUp } from './support/sign-up';
 
 describe('Visits module (e2e)', () => {
@@ -26,19 +32,31 @@ describe('Visits module (e2e)', () => {
       imports: [
         ConfigModule.forRoot({ isGlobal: true }),
         EventEmitterModule.forRoot(),
+        ScheduleModule.forRoot(),
         PrismaModule,
         StorageModule,
         AuthModule,
         PropertiesModule,
         VisitsModule,
+        // TenanciesModule/PaymentsModule/ContractsModule are only pulled in
+        // for the "expressing interest, then creating a tenancy" test,
+        // which needs a real tenancy.created event on the bus for
+        // VisitsService's own listener to react to — same forwardRef chain
+        // contracts.e2e-spec.ts already needs for the same reason.
+        TenanciesModule,
+        PaymentsModule,
+        ContractsModule,
       ],
     })
       .overrideProvider(SMS_GATEWAY)
       .useValue(fakeSms)
+      .overrideProvider(PAYMENT_GATEWAY)
+      .useValue(new FakePaymentGateway())
       .compile();
 
     app = moduleRef.createNestApplication();
     configureApp(app);
+    app.enableShutdownHooks();
     await app.init();
 
     prisma = app.get(PrismaService);
@@ -49,7 +67,14 @@ describe('Visits module (e2e)', () => {
   });
 
   afterEach(async () => {
+    await prisma.unitInterest.deleteMany();
     await prisma.visitRequest.deleteMany();
+    await prisma.paymentWebhookRaw.deleteMany();
+    await prisma.ledgerEntry.deleteMany();
+    await prisma.payment.deleteMany();
+    await prisma.contract.deleteMany();
+    await prisma.terminationNotice.deleteMany();
+    await prisma.tenancy.deleteMany();
     await prisma.unitPhoto.deleteMany();
     await prisma.unit.deleteMany();
     await prisma.property.deleteMany();
@@ -260,5 +285,62 @@ describe('Visits module (e2e)', () => {
 
     expect(res.body.results).toHaveLength(1);
     expect(res.body.results[0].id).toBe(pending.body.id);
+  });
+
+  it('lets a tenant express interest in a unit, idempotently, and surfaces it in the landlord inbox', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createListedUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+
+    const first = await request(app.getHttpServer())
+      .post(`/v1/units/${unitId}/interest`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(201);
+    expect(first.body).toMatchObject({ unit_id: unitId, tenant_id: tenant.user.id, status: 'pending' });
+
+    // A second click doesn't create a duplicate row.
+    const second = await request(app.getHttpServer())
+      .post(`/v1/units/${unitId}/interest`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(201);
+    expect(second.body.id).toBe(first.body.id);
+
+    const inbox = await request(app.getHttpServer())
+      .get('/v1/landlords/me/interests')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(inbox.body.results).toHaveLength(1);
+    expect(inbox.body.results[0]).toMatchObject({
+      id: first.body.id,
+      unit_id: unitId,
+      tenant_id: tenant.user.id,
+      tenant_phone_number: tenant.user.phone_number,
+      status: 'pending',
+    });
+  });
+
+  it("marks a tenant's interest as converted once the landlord creates a tenancy for them on that unit", async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createListedUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+
+    const interest = await request(app.getHttpServer())
+      .post(`/v1/units/${unitId}/interest`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 100000 })
+      .expect(201);
+
+    const inbox = await request(app.getHttpServer())
+      .get('/v1/landlords/me/interests')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(inbox.body.results.find((i: { id: string }) => i.id === interest.body.id)).toMatchObject({
+      status: 'converted',
+    });
   });
 });
