@@ -256,17 +256,47 @@ CREATE TABLE unit_photos (
     sort_order          SMALLINT NOT NULL DEFAULT 0,
     uploaded_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Added 2026-09-20. APPEND-ONLY audit trail of landlord edits to properties/units
+-- (never UPDATE or DELETE from application code — same rule as ledger_entries).
+-- Written in the same transaction as the edit it describes.
+CREATE TYPE listing_entity_type AS ENUM ('property', 'unit');
+CREATE TABLE listing_changes (
+    id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_type                 listing_entity_type NOT NULL,
+    property_id                 UUID NOT NULL,           -- always set: a unit change records its property too
+    unit_id                     UUID,                    -- set when entity_type = 'unit'
+    entity_label                TEXT,                    -- name/label at the time (either can be edited later)
+    changed_by                  UUID NOT NULL,           -- users.id (no FK: audit rows outlive account changes)
+    action                      TEXT NOT NULL,           -- 'updated' | 'photo_added' | 'photo_removed' | 'cover_photo_changed'
+    changes                     JSONB NOT NULL,          -- [{ field, from, to }], only fields that actually changed
+    note                        TEXT,                    -- landlord's stated reason
+    occupied_unit_ids           UUID[] NOT NULL DEFAULT '{}',  -- affected units with a tenant living there (occupied / notice_given)
+    property_verified_at_change BOOLEAN NOT NULL,        -- property had the ownership-verified badge at the time
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_listing_changes_property ON listing_changes(property_id, created_at);
+CREATE INDEX idx_listing_changes_unit ON listing_changes(unit_id, created_at);
+CREATE INDEX idx_listing_changes_actor ON listing_changes(changed_by, created_at);
+CREATE INDEX idx_listing_changes_created ON listing_changes(created_at);
 ```
 
 **Key endpoints**
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/properties` | Landlord creates a property |
+| PATCH | `/properties/{id}` | Landlord edits any property detail (recorded in `listing_changes`) |
 | POST | `/properties/{id}/units` | Add a unit to a property |
 | POST | `/units/{id}/photos` | Upload geo-tagged photo |
+| DELETE | `/units/{id}/photos/{photoId}` | Remove a photo (recorded) |
+| POST | `/units/{id}/photos/{photoId}/cover` | Make a photo the cover (recorded) |
 | GET | `/units?status=vacant&city=Douala` | Public/tenant search |
 | GET | `/landlords/me/units` | Landlord's occupancy grid source data |
-| PATCH | `/units/{id}` | Update rent/description/status |
+| GET | `/landlords/me/properties` | Landlord's properties with unit / occupied-unit counts |
+| PATCH | `/units/{id}` | Edit any unit detail (recorded in `listing_changes`) |
+| GET | `/landlords/me/listing-changes` | Landlord's own edit history |
+| GET | `/tenancies/{id}/listing-changes` | Edits to a tenancy's home since it began (landlord or tenant) |
+| GET | `/admin/listing-changes` | Admin audit of all edits, filterable to "while a tenant lived there" |
 
 **Events published:** `unit.listed`, `unit.status_changed`
 **Events consumed:** `tenancy.created` (→ set unit status to `occupied`), `tenancy.terminated` (→ set unit status to `vacant`)
@@ -412,7 +442,7 @@ CREATE TABLE payments (
     currency                     CHAR(3) NOT NULL DEFAULT 'XAF',
     period_start                  DATE NOT NULL,           -- rent period this payment covers
     period_end                     DATE NOT NULL,
-    provider                        VARCHAR(20) NOT NULL,   -- 'campay' | 'monetbil'
+    provider                        VARCHAR(20) NOT NULL,   -- 'campay' | 'monetbil' | 'offline' ('offline' added 2026-09-20: rent the landlord records as already received, e.g. cash paid upfront at tenancy creation — written only by the Payments module, never accepted from a client request)
     provider_txn_ref                 VARCHAR(100),           -- external transaction id
     idempotency_key                    VARCHAR(100) NOT NULL UNIQUE, -- client-generated, prevents double-charge
     status                              VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -664,27 +694,43 @@ CREATE TABLE complaint_updates (
 
 ### B.9 Admin / Ops Module
 
-Mostly a read/action layer over other modules rather than owning much independent data — but does own:
+Built 2026-09-24. Mostly a read/action layer over other modules rather than owning much independent data — but does own:
 
 ```sql
 CREATE TABLE admin_actions_log (
-    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    admin_id                 UUID NOT NULL,
-    action_type                VARCHAR(50) NOT NULL,        -- 'kyc_approved' | 'listing_removed' | 'payment_reviewed' | ...
-    target_type                  VARCHAR(30) NOT NULL,       -- 'user' | 'property' | 'payment' | ...
-    target_id                      UUID NOT NULL,
-    detail                            JSONB,
-    created_at                          TIMESTAMPTZ NOT NULL DEFAULT now()
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admin_id    UUID NOT NULL,               -- references users.id — no FK: an audit row outlives account changes
+    action_type VARCHAR(50) NOT NULL,        -- 'kyc_approved' | 'listing_flagged' | 'listing_unflagged' | 'listing_removed'
+    target_type VARCHAR(30) NOT NULL,        -- 'user' | 'unit'
+    target_id   UUID NOT NULL,
+    detail      JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_admin_actions_target ON admin_actions_log(target_type, target_id, created_at);
+CREATE INDEX idx_admin_actions_admin ON admin_actions_log(admin_id, created_at);
+CREATE INDEX idx_admin_actions_created ON admin_actions_log(created_at);
 ```
 
-Every admin action that touches another module's data goes through that module's own API (e.g., KYC approval calls the Auth module's endpoint) — this log is purely an audit trail, not a bypass mechanism, keeping the module data-ownership rule intact even for privileged operations.
+Every admin action that touches another module's data goes through that module's own API (e.g., KYC approval calls the Auth module's endpoint) — this log is purely an audit trail, not a bypass mechanism, keeping the module data-ownership rule intact even for privileged operations. Two ways a row gets written, both ending up here: (1) this module's own endpoints (listing flag/unflag/remove) call `UnitsService`'s public methods, then log directly, in that order — not a single transaction, since the log table and the units table belong to different modules (see the disclosed risk note in `admin.service.ts`); (2) an existing action on *another* module's own endpoint (Auth's `POST /admin/users/{id}/kyc/approve`) is observed via an `@OnEvent` listener on `user.kyc_tier_changed` instead of Auth calling into Admin directly — keeps the dependency one-directional (Admin → Auth/Properties/Payments, never back), so no `forwardRef` is needed here unlike Tenancies↔Payments/Contracts.
+
+Listing moderation reuses B.2's `units` table rather than a table of its own — three added columns (`flagged_at`, `flag_reason`, `flagged_by`), landlord-invisible-by-design (not on `PATCH /units/{id}`'s DTO) and cleared again on unflag/remove:
+```sql
+ALTER TABLE units
+    ADD COLUMN flagged_at  TIMESTAMPTZ,
+    ADD COLUMN flag_reason TEXT,
+    ADD COLUMN flagged_by  UUID;          -- references users.id, the admin who flagged it
+CREATE INDEX idx_units_flagged ON units(flagged_at);
+```
+A flagged unit is excluded from `GET /units` and `GET /units/{id}` regardless of `status` — that's the actual effect of flagging, not just a queue entry. There is no tenant/public "report a listing" flow feeding this queue in this MVP; flags are entirely admin-initiated (see api-specification.md Section 11).
 
 **Key endpoints**
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/admin/kyc-queue` | Pending verification requests |
 | GET | `/admin/listings/flagged` | Moderation queue |
+| POST | `/admin/listings/{id}/flag` | Flag a unit (removes it from public listings) |
+| POST | `/admin/listings/{id}/unflag` | Dismiss a flag |
+| POST | `/admin/listings/{id}/remove` | Take a listing down for good (back to `draft`) |
 | GET | `/admin/payments/disputes` | Payments needing manual review |
 | GET | `/admin/audit-log` | Full admin action history |
 

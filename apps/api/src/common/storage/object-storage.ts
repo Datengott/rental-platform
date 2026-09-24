@@ -13,7 +13,7 @@ export interface ObjectStorage {
   upload(folder: string, buffer: Buffer, originalName: string): Promise<string>;
 }
 
-const LOCAL_UPLOAD_ROOT = join(process.cwd(), 'uploads');
+export const LOCAL_UPLOAD_ROOT = join(process.cwd(), 'uploads');
 
 @Injectable()
 export class LocalDiskObjectStorage implements ObjectStorage {

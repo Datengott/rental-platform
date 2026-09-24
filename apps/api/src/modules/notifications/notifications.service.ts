@@ -287,7 +287,12 @@ export class NotificationsService {
     await this.dispatch(
       parties.tenantId,
       PAYMENT_CONFIRMED,
-      { unitLabel: unit.label ?? undefined, periodEnd: event.periodEnd },
+      {
+        unitLabel: unit.label ?? undefined,
+        paidAt: event.confirmedAt.slice(0, 10),
+        periodStart: event.periodStart,
+        periodEnd: event.periodEnd,
+      },
       event.tenancyId,
       toLocale(tenant.locale),
     );

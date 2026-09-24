@@ -59,6 +59,9 @@ describe('Tenancies module (e2e)', () => {
   });
 
   afterEach(async () => {
+    await prisma.paymentWebhookRaw.deleteMany();
+    await prisma.ledgerEntry.deleteMany();
+    await prisma.payment.deleteMany();
     await prisma.terminationNotice.deleteMany();
     await prisma.tenancy.deleteMany();
     await prisma.unitPhoto.deleteMany();
@@ -137,6 +140,188 @@ describe('Tenancies module (e2e)', () => {
       .set('Authorization', `Bearer ${landlord.access_token}`)
       .expect(200);
     expect(landlordCallingTenantRoute.body).toEqual([]);
+  });
+
+  it('records rent the landlord says was paid upfront: ledger credit, paid_through_date, receipt, and the tenant sees it', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+
+    const created = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 150000, prepaid_months: 3 })
+      .expect(201);
+
+    // Sept 1 + 3 months (calendar-month convention) => through Nov 30, in the response itself.
+    expect(created.body.paid_through_date).toBe('2026-11-30');
+
+    // What the tenant's dashboard loads on open.
+    const tenantList = await request(app.getHttpServer())
+      .get('/v1/tenants/me/tenancies')
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    const mine = tenantList.body[0];
+    expect(mine).toMatchObject({ id: created.body.id, paid_through_date: '2026-11-30', current_balance: 450000 });
+    expect(mine.recent_ledger_entries).toHaveLength(1);
+    expect(mine.recent_ledger_entries[0]).toMatchObject({
+      type: 'credit',
+      amount: '450000',
+      running_balance: '450000',
+      provider: 'offline',
+    });
+    expect(mine.recent_ledger_entries[0].description).toContain('paid upfront');
+
+    // A real, confirmed payment with a receipt — not a bare number on the tenancy.
+    const receipt = await request(app.getHttpServer())
+      .get(`/v1/payments/${mine.recent_ledger_entries[0].payment_id}/receipt`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    expect(receipt.body.download_url).toContain('local://receipts/');
+
+    // The landlord sees the same on their dashboard.
+    const landlordList = await request(app.getHttpServer())
+      .get('/v1/landlords/me/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(landlordList.body[0]).toMatchObject({ paid_through_date: '2026-11-30', current_balance: 450000 });
+  });
+
+  it('says when the next payment is due: the start date until anything is paid, then the day after paid-through', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitA = await createVacantUnit(landlord.access_token);
+    const unitB = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+
+    // Start date in the future (not the day of creation): billing starts THEN.
+    const future = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitA, tenant_id: tenant.user.id, start_date: '2027-03-15', rent_amount: 150000 })
+      .expect(201);
+    expect(future.body).toMatchObject({ start_date: '2027-03-15', paid_through_date: null, next_payment_due_date: '2027-03-15' });
+
+    const prepaid = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitB, tenant_id: tenant.user.id, start_date: '2026-09-20', rent_amount: 150000, prepaid_months: 3 })
+      .expect(201);
+    // Sept 20 + 3 calendar months => through Nov 30; next payment the day after.
+    expect(prepaid.body).toMatchObject({ paid_through_date: '2026-11-30', next_payment_due_date: '2026-12-01' });
+
+    // The ledger entry says when it was paid and which months it covers.
+    const tenantList = await request(app.getHttpServer())
+      .get('/v1/tenants/me/tenancies')
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    const withPayment = tenantList.body.find((t: { id: string }) => t.id === prepaid.body.id);
+    expect(withPayment.recent_ledger_entries[0]).toMatchObject({
+      period_start: '2026-09-20',
+      period_end: '2026-11-30',
+      months_covered: 3,
+    });
+    expect(new Date(withPayment.recent_ledger_entries[0].paid_at).getTime()).not.toBeNaN();
+  });
+
+  it('shows the day the tenant actually paid (not the day it was recorded), and refuses a future date', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+    const body = { unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 150000, prepaid_months: 2 };
+
+    const future = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ ...body, prepaid_paid_on: '2099-01-01' })
+      .expect(422);
+    expect(future.body.error.code).toBe('PREPAID_PAID_ON_INVALID');
+
+    await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ ...body, prepaid_paid_on: '2026-08-28' })
+      .expect(201);
+
+    const tenantList = await request(app.getHttpServer())
+      .get('/v1/tenants/me/tenancies')
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    const entry = tenantList.body[0].recent_ledger_entries[0];
+    expect(entry.paid_at.slice(0, 10)).toBe('2026-08-28');
+    // ...while the ledger row itself still records when it was actually entered.
+    expect(entry.created_at.slice(0, 10)).not.toBe('2026-08-28');
+  });
+
+  it('a tenancy without prepaid_months has no payment or ledger entry', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+
+    await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 150000 })
+      .expect(201);
+
+    const tenantList = await request(app.getHttpServer())
+      .get('/v1/tenants/me/tenancies')
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    expect(tenantList.body[0]).toMatchObject({ paid_through_date: null, current_balance: 0, recent_ledger_entries: [] });
+  });
+
+  it('rejects an invalid prepaid_months without creating a tenancy (or occupying the unit)', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+    const body = { unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 300000 };
+
+    // 2 months of a quarterly tenancy isn't a whole billing cycle.
+    const notWholeCycles = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ ...body, billing_cycle: 'quarterly', prepaid_months: 2 })
+      .expect(422);
+    expect(notWholeCycles.body.error.code).toBe('PREPAID_MONTHS_INVALID_FOR_BILLING_CYCLE');
+
+    for (const bad of [0, 25, 1.5]) {
+      const res = await request(app.getHttpServer())
+        .post('/v1/tenancies')
+        .set('Authorization', `Bearer ${landlord.access_token}`)
+        .send({ ...body, prepaid_months: bad })
+        .expect(400);
+      expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    }
+
+    const list = await request(app.getHttpServer())
+      .get('/v1/landlords/me/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(list.body).toEqual([]);
+    const units = await request(app.getHttpServer())
+      .get('/v1/landlords/me/units')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .expect(200);
+    expect(units.body.find((u: { id: string }) => u.id === unitId).status).toBe('vacant');
+  });
+
+  it("a tenant can't mark their own rent as paid by sending provider 'offline'", async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createVacantUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+    const created = await request(app.getHttpServer())
+      .post('/v1/tenancies')
+      .set('Authorization', `Bearer ${landlord.access_token}`)
+      .send({ unit_id: unitId, tenant_id: tenant.user.id, start_date: '2026-09-01', rent_amount: 150000 })
+      .expect(201);
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/tenancies/${created.body.id}/payments`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .set('Idempotency-Key', 'try-offline-1')
+      .send({ amount: 150000, currency: 'XAF', period_start: '2026-09-01', period_end: '2026-09-30', provider: 'offline' })
+      .expect(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
 
   it('rejects creating a tenancy on a non-vacant unit', async () => {

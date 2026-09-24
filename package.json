@@ -10,6 +10,7 @@
     "postinstall": "prisma generate",
     "dev": "docker compose up",
     "dev:build": "docker compose up --build",
+    "seed": "docker compose exec api npm run seed --workspace=apps/api",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",

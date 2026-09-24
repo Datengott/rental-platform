@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
@@ -20,6 +20,8 @@ const REFRESH_TOKEN_TTL_DAYS = 30;
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
@@ -42,7 +44,7 @@ export class AuthService {
       );
     }
 
-    const otp = generateOtp();
+    const otp = this.pickOtp(dto.phone_number);
     const otpTtlSeconds = Number(this.config.get('OTP_TTL_SECONDS') ?? 300);
 
     const challenge = await this.prisma.otpChallenge.create({
@@ -57,6 +59,31 @@ export class AuthService {
     await this.smsGateway.send(dto.phone_number, `Your rental platform verification code is ${otp}`);
 
     return { challenge_id: challenge.id, expires_in_seconds: otpTtlSeconds };
+  }
+
+  // Demo/dev convenience only: the seeded demo accounts (see src/seed/seed.ts)
+  // get a fixed, documented code so a stakeholder can sign
+  // in without tailing the SMS stub's logs. Needs BOTH env vars set, only
+  // applies to the phone numbers listed in DEMO_ACCOUNT_PHONES, and is
+  // refused outright in production — a static OTP is a login backdoor
+  // anywhere real users exist, so the guard is deliberately not optional.
+  private pickOtp(phoneNumber: string): string {
+    const staticOtp = this.config.get<string>('DEMO_STATIC_OTP');
+    const demoPhones = (this.config.get<string>('DEMO_ACCOUNT_PHONES') ?? '')
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    if (staticOtp && demoPhones.includes(phoneNumber)) {
+      if (process.env.NODE_ENV === 'production') {
+        this.logger.error('DEMO_STATIC_OTP is set in production — ignoring it and issuing a random OTP.');
+      } else if (!/^\d{6}$/.test(staticOtp)) {
+        this.logger.warn('DEMO_STATIC_OTP must be exactly 6 digits — ignoring it.');
+      } else {
+        return staticOtp;
+      }
+    }
+    return generateOtp();
   }
 
   async verifyOtp(dto: VerifyOtpDto) {

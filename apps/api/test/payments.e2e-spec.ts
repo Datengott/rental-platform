@@ -235,6 +235,21 @@ describe('Payments module (e2e)', () => {
     expect(conflict.body.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 
+  it('rejects rent for a period before the tenancy start date — billing starts on that date', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+    const { tenancyId } = await setUpTenancy(landlord.access_token, tenant.user.id);
+
+    // setUpTenancy starts the tenancy on 2026-09-01.
+    const res = await request(app.getHttpServer())
+      .post(`/v1/tenancies/${tenancyId}/payments`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .set('Idempotency-Key', 'e2e-before-start')
+      .send({ ...validPaymentBody, period_start: '2026-08-01', period_end: '2026-08-31' })
+      .expect(422);
+    expect(res.body.error.code).toBe('PAYMENT_BEFORE_TENANCY_START');
+  });
+
   it('rejects an amount that does not match whole billing cycles of rent', async () => {
     const landlord = await signUp(app, fakeSms, randomPhoneNumber());
     const tenant = await signUp(app, fakeSms, randomPhoneNumber());
@@ -271,14 +286,17 @@ describe('Payments module (e2e)', () => {
     await request(app.getHttpServer())
       .post(`/v1/tenancies/${tenancyId}/termination-notices`)
       .set('Authorization', `Bearer ${landlord.access_token}`)
-      .send({ reason: 'end_of_term', effective_date: '2026-12-20' })
+      // Well beyond the 90-day statutory floor from "today", however far in
+      // the future this suite happens to run — a date close to that floor
+      // rots as real time passes (this one used to be 2026-12-20).
+      .send({ reason: 'end_of_term', effective_date: '2027-06-20' })
       .expect(201);
 
     const res = await request(app.getHttpServer())
       .post(`/v1/tenancies/${tenancyId}/payments`)
       .set('Authorization', `Bearer ${tenant.access_token}`)
       .set('Idempotency-Key', 'e2e-key-notice')
-      .send({ ...validPaymentBody, period_start: '2027-01-01', period_end: '2027-01-31' })
+      .send({ ...validPaymentBody, period_start: '2027-07-01', period_end: '2027-07-31' })
       .expect(422);
     expect(res.body.error.code).toBe('PAYMENT_BEYOND_NOTICE_EFFECTIVE_DATE');
   });

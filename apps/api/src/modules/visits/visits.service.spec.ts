@@ -206,6 +206,29 @@ describe('VisitsService', () => {
     });
   });
 
+  describe('listInterestsForTenant', () => {
+    it("returns only the tenant's own interests", async () => {
+      prisma.unitInterest.findMany.mockResolvedValue([
+        {
+          id: 'interest-1',
+          unitId: 'unit-1',
+          tenantId: 'tenant-1',
+          landlordId: 'landlord-1',
+          status: 'pending',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ]);
+
+      const result = await service.listInterestsForTenant('tenant-1');
+
+      expect(prisma.unitInterest.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { tenantId: 'tenant-1' } }),
+      );
+      expect(result.results).toEqual([expect.objectContaining({ id: 'interest-1', unit_id: 'unit-1', status: 'pending' })]);
+    });
+  });
+
   describe('handleTenancyCreated', () => {
     it('marks a matching pending interest as converted', async () => {
       await service.handleTenancyCreated({

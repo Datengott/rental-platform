@@ -31,6 +31,12 @@ services:
     environment:
       DATABASE_URL: postgresql://rental_dev:rental_dev_password@postgres:5432/rental_platform
       REDIS_URL: redis://redis:6379
+      # Demo/dev only — see .env.example. A fixed OTP for the two seeded demo
+      # accounts (npm run seed); ignored when NODE_ENV=production.
+      DEMO_STATIC_OTP: "123456"
+      DEMO_ACCOUNT_PHONES: "+237600000001,+237600000002"
+      # Where the browser reaches this api's /media/* (public listing photos).
+      API_PUBLIC_URL: http://localhost:3000
     ports:
       - "3000:3000"
     volumes:
@@ -75,6 +81,9 @@ services:
       target: development
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:3000/v1
+      # Demo/dev only: shows a "Demo accounts" helper on the sign-in page.
+      NEXT_PUBLIC_SHOW_DEMO_LOGINS: "true"
+      NEXT_PUBLIC_DEMO_OTP: "123456"
     ports:
       - "3001:3001"
     volumes:

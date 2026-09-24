@@ -6,6 +6,7 @@
     "build": "nest build",
     "start": "node dist/main",
     "start:dev": "nest start --watch",
+    "seed": "node dist/seed/seed.js",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "jest --passWithNoTests",
     "test:e2e": "jest --config ./test/jest-e2e.json --passWithNoTests --runInBand"

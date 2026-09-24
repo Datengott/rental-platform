@@ -76,6 +76,65 @@ describe('AuthService', () => {
       expect(createCall.data.phoneNumber).toBe('+237670000001');
     });
 
+    describe('demo static OTP', () => {
+      const demoPhone = '+237600000001';
+
+      function withConfig(values: Record<string, string>) {
+        (config.get as jest.Mock).mockImplementation((key: string) => values[key]);
+      }
+
+      function sentCode(): string {
+        const message = (smsGateway.send.mock.calls[0] as [string, string])[1];
+        return /(\d{6})/.exec(message)![1];
+      }
+
+      beforeEach(() => {
+        prisma.otpChallenge.findFirst.mockResolvedValue(null);
+        prisma.otpChallenge.create.mockResolvedValue({ id: 'challenge-1' });
+      });
+
+      it('uses the fixed code for a listed demo phone when configured', async () => {
+        withConfig({ DEMO_STATIC_OTP: '123456', DEMO_ACCOUNT_PHONES: `${demoPhone}, +237600000002` });
+        await service.requestOtp({ phone_number: demoPhone, purpose: OtpPurpose.login });
+        expect(sentCode()).toBe('123456');
+      });
+
+      it('leaves every other phone number on a random code', async () => {
+        withConfig({ DEMO_STATIC_OTP: '123456', DEMO_ACCOUNT_PHONES: demoPhone });
+        const codes = new Set<string>();
+        for (let i = 0; i < 5; i++) {
+          smsGateway.send.mockClear();
+          await service.requestOtp({ phone_number: '+237670000009', purpose: OtpPurpose.login });
+          codes.add(sentCode());
+        }
+        // 5 random 6-digit codes all equal to 123456 is (1e-6)^5 — i.e. never.
+        expect(codes.has('123456') && codes.size === 1).toBe(false);
+      });
+
+      it('refuses the fixed code in production even for a listed demo phone', async () => {
+        const previous = process.env.NODE_ENV;
+        process.env.NODE_ENV = 'production';
+        try {
+          withConfig({ DEMO_STATIC_OTP: '654321', DEMO_ACCOUNT_PHONES: demoPhone });
+          const codes = new Set<string>();
+          for (let i = 0; i < 5; i++) {
+            smsGateway.send.mockClear();
+            await service.requestOtp({ phone_number: demoPhone, purpose: OtpPurpose.login });
+            codes.add(sentCode());
+          }
+          expect(codes.has('654321') && codes.size === 1).toBe(false);
+        } finally {
+          process.env.NODE_ENV = previous;
+        }
+      });
+
+      it('ignores a malformed fixed code', async () => {
+        withConfig({ DEMO_STATIC_OTP: 'abc', DEMO_ACCOUNT_PHONES: demoPhone });
+        await service.requestOtp({ phone_number: demoPhone, purpose: OtpPurpose.login });
+        expect(sentCode()).toMatch(/^\d{6}$/);
+      });
+    });
+
     it('rejects with TOO_MANY_ATTEMPTS when a challenge was created within the cooldown', async () => {
       prisma.otpChallenge.findFirst.mockResolvedValue({ id: 'recent-challenge' });
 

@@ -47,6 +47,12 @@ export class VisitsController {
     return this.visitsService.expressInterest(user.userId, unitId);
   }
 
+  @Get('tenants/me/interests')
+  @ApiOperation({ summary: 'Units you have expressed interest in (tenant side).' })
+  listMyInterestsAsTenant(@CurrentUser() user: AuthenticatedUser) {
+    return this.visitsService.listInterestsForTenant(user.userId);
+  }
+
   @Get('landlords/me/interests')
   @ApiOperation({ summary: 'Landlord inbox — tenants who expressed interest in your units.' })
   listMyInterests(@CurrentUser() user: AuthenticatedUser, @Query() query: ListUnitInterestsDto) {

@@ -26,7 +26,11 @@ export interface PaymentInitiatedEvent {
 export interface PaymentConfirmedEvent {
   paymentId: string;
   tenancyId: string;
+  // Carried so listeners can say when a payment was made and what it
+  // covers (added 2026-09-20) without reading Payments' tables.
+  periodStart: string; // YYYY-MM-DD
   periodEnd: string; // YYYY-MM-DD
+  confirmedAt: string; // ISO timestamp
 }
 
 export interface PaymentFailedEvent {

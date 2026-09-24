@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { TenancyStatus, UnitStatus } from '@prisma/client';
 import { ApiException } from '../../common/exceptions/api.exception';
+import { addDays } from '../../common/format/period';
 import {
   TENANCY_CREATED,
   TENANCY_NOTICE_GIVEN,
@@ -15,6 +16,7 @@ import { PAYMENT_CONFIRMED, PaymentConfirmedEvent } from '../../common/events/pa
 import { PrismaService } from '../../common/prisma.service';
 import { OBJECT_STORAGE, ObjectStorage } from '../../common/storage/object-storage';
 import { UnitsService } from '../properties/units.service';
+import { ListingChangesService } from '../properties/listing-changes.service';
 import { UsersService } from '../auth/users.service';
 import { PaymentsService } from '../payments/payments.service';
 import { ContractsService } from '../contracts/contracts.service';
@@ -36,6 +38,7 @@ export class TenanciesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly units: UnitsService,
+    private readonly listingChanges: ListingChangesService,
     private readonly usersService: UsersService,
     private readonly events: EventEmitter2,
     @Inject(OBJECT_STORAGE) private readonly objectStorage: ObjectStorage,
@@ -74,6 +77,28 @@ export class TenanciesService {
       );
     }
 
+    // Validate the upfront-rent request BEFORE creating anything, so a bad
+    // value can't leave a tenancy behind with no payment recorded.
+    if (dto.prepaid_paid_on !== undefined && dto.prepaid_months === undefined) {
+      throw new ApiException(
+        'VALIDATION_ERROR',
+        'prepaid_paid_on only applies together with prepaid_months.',
+        HttpStatus.BAD_REQUEST,
+        [{ field: 'prepaid_paid_on', message: 'requires prepaid_months' }],
+      );
+    }
+    const startDate = new Date(dto.start_date);
+    const prepaidPlan =
+      dto.prepaid_months !== undefined
+        ? this.paymentsService.planPrepaidRent({
+            rentAmount: dto.rent_amount,
+            billingCycle: dto.billing_cycle ?? 'monthly',
+            startDate,
+            months: dto.prepaid_months,
+            paidOn: dto.prepaid_paid_on,
+          })
+        : null;
+
     const tenancy = await this.prisma.tenancy.create({
       data: {
         unitId: dto.unit_id,
@@ -102,6 +127,20 @@ export class TenanciesService {
       landlordId,
     } satisfies TenancyCreatedEvent);
 
+    if (prepaidPlan) {
+      // Goes through Payments (ledger credit + receipt + payment.confirmed,
+      // which advances paid_through_date via handlePaymentConfirmed below and
+      // notifies the tenant) — never a direct write to the ledger from here.
+      await this.paymentsService.recordPrepaidRent(
+        { id: tenancy.id, tenantId: tenancy.tenantId, currency: tenancy.currency },
+        prepaidPlan,
+        landlordId,
+      );
+      // Re-read so the response carries the paid_through_date the event just wrote.
+      const updated = await this.prisma.tenancy.findUniqueOrThrow({ where: { id: tenancy.id } });
+      return this.toResponse(updated);
+    }
+
     return this.toResponse(tenancy);
   }
 
@@ -118,6 +157,7 @@ export class TenanciesService {
         // (this list) needs contract status just as much as the detail
         // view does. Missing here was a real gap the web demo caught live.
         contract_status: await this.contractsService.getLatestStatusForTenancy(t.id),
+        recent_ledger_entries: await this.paymentsService.getRecentLedgerEntries(t.id, 5),
       })),
     );
   }
@@ -137,6 +177,10 @@ export class TenanciesService {
         ...this.toResponse(t),
         current_balance: await this.paymentsService.getCurrentBalance(t.id),
         contract_status: await this.contractsService.getLatestStatusForTenancy(t.id),
+        // Same field getById() returns — without it the tenant dashboard
+        // (which loads from this list) couldn't show the ledger, including
+        // rent the landlord recorded as paid upfront, until a detail fetch.
+        recent_ledger_entries: await this.paymentsService.getRecentLedgerEntries(t.id, 5),
       })),
     );
   }
@@ -178,6 +222,7 @@ export class TenanciesService {
       tenantId: tenancy.tenantId,
       landlordId: tenancy.landlordId,
       status: tenancy.status,
+      startDate: tenancy.startDate,
       rentAmount: tenancy.rentAmount,
       billingCycle: tenancy.billingCycle,
       maxAdvanceMonths: tenancy.maxAdvanceMonths,
@@ -345,6 +390,21 @@ export class TenanciesService {
     return this.toNoticeResponse(notice);
   }
 
+  // What changed about this home since the tenancy was created: edits the
+  // landlord made to the unit, and to its property. Visible to both parties —
+  // the tenant to see if details moved after they committed, the landlord to
+  // see what the tenant sees. (Through Properties' public interface, never a
+  // direct read of its tables.)
+  async listListingChanges(requesterId: string, tenancyId: string) {
+    const tenancy = await this.getAccessibleTenancy(requesterId, tenancyId);
+    const unit = await this.units.getUnitOwnership(tenancy.unitId);
+    return this.listingChanges.listForTenancy({
+      unitId: tenancy.unitId,
+      propertyId: unit.propertyId,
+      since: tenancy.createdAt,
+    });
+  }
+
   async listTerminationNotices(requesterId: string, tenancyId: string) {
     await this.getAccessibleTenancy(requesterId, tenancyId);
     const notices = await this.prisma.terminationNotice.findMany({
@@ -405,6 +465,13 @@ export class TenanciesService {
     return tenancy;
   }
 
+  private nextPaymentDueDate(tenancy: { status: string; startDate: Date; paidThroughDate: Date | null }): string | null {
+    if (tenancy.status === TenancyStatus.terminated || tenancy.status === TenancyStatus.expired) return null;
+    const base = tenancy.paidThroughDate ?? tenancy.startDate;
+    const iso = base.toISOString().slice(0, 10);
+    return tenancy.paidThroughDate ? addDays(iso, 1) : iso;
+  }
+
   private monthsPaidAhead(paidThroughDate: Date | null): number {
     if (!paidThroughDate) return 0;
     const today = new Date();
@@ -454,6 +521,12 @@ export class TenanciesService {
       // (expectedAmountFor in PaymentsService remains the source of truth
       // for what a payment must actually cover).
       months_paid_ahead: this.monthsPaidAhead(tenancy.paidThroughDate),
+      // When the next rent payment is expected (added 2026-09-20): the day
+      // after the paid-through date, or the tenancy's start date if nothing
+      // has been paid yet — billing starts on the start date, which may be
+      // later than (or before) the day the tenancy was created. Null once the
+      // tenancy has ended, since nothing further is owed.
+      next_payment_due_date: this.nextPaymentDueDate(tenancy),
       reminder_first_days_before: tenancy.reminderFirstDaysBefore,
       reminder_second_days_before: tenancy.reminderSecondDaysBefore,
       status: tenancy.status,

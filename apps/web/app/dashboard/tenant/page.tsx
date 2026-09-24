@@ -1,11 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import NavBar from "@/components/NavBar";
+import { IconArrowRight, IconImage, IconPin, IconSearch } from "@/components/Icons";
+import HomeChanges from "@/components/HomeChanges";
+import PaymentHistory from "@/components/PaymentHistory";
 import { api, ApiError, loadSession } from "@/lib/api";
-import { Contract, PublicUnit, Tenancy } from "@/lib/types";
-import { facilityLabel, PROPERTY_TYPE_LABELS } from "@/lib/facilities";
+import { addDays as addOneDayTo, describeCoveredMonths, dueStatus, formatDate, todayIso } from "@/lib/dates";
+import { formatMoney } from "@/lib/format";
+import { Contract, MyInterest, PublicUnitDetail, Tenancy } from "@/lib/types";
 
 const BILLING_CYCLE_MONTHS: Record<string, number> = { monthly: 1, quarterly: 3, biannual: 6 };
 
@@ -54,27 +58,34 @@ function nextBillingPeriod(
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
+interface InterestRow {
+  interest: MyInterest;
+  // null when the unit is no longer publicly listed (rented, or taken down).
+  unit: PublicUnitDetail | null;
+}
+
 export default function TenantPage() {
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const [userId, setUserId] = useState("");
 
-  const [units, setUnits] = useState<PublicUnit[]>([]);
+  const [interests, setInterests] = useState<InterestRow[] | null>(null);
   const [tenancyIdInput, setTenancyIdInput] = useState("");
   const [showLookup, setShowLookup] = useState(false);
   const [tenancies, setTenancies] = useState<Record<string, Tenancy>>({});
   const [contracts, setContracts] = useState<Record<string, Contract>>({});
   const [payCycles, setPayCycles] = useState<Record<string, number>>({});
-  const [interestedUnitIds, setInterestedUnitIds] = useState<Set<string>>(new Set());
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [payingId, setPayingId] = useState<string | null>(null);
+  // Lazy initialiser: today's date is read once, not on every render.
+  const [today] = useState(todayIso);
 
   useEffect(() => {
     const session = loadSession();
     if (!session) {
-      router.replace("/login");
+      router.replace("/login?next=/dashboard/tenant");
       return;
     }
     // Session hydration + page gating on mount — there's no other
@@ -82,7 +93,7 @@ export default function TenantPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setUserId(session.user.id);
     setReady(true);
-    void loadUnits();
+    void loadInterests();
     void loadMyTenancies();
     // Legacy fallback for tenancies previously added by manual id lookup,
     // before /tenants/me/tenancies existed (2026-09-18) — harmless no-op
@@ -96,12 +107,22 @@ export default function TenantPage() {
     setTimeout(() => setNotice(null), 4000);
   }
 
-  async function loadUnits() {
+  async function loadInterests() {
     try {
-      const res = await api<{ results: PublicUnit[] }>("/units");
-      setUnits(res.results);
+      const res = await api<{ results: MyInterest[] }>("/tenants/me/interests");
+      const rows = await Promise.all(
+        res.results.map(async (interest): Promise<InterestRow> => {
+          try {
+            return { interest, unit: await api<PublicUnitDetail>(`/units/${interest.unit_id}`, { auth: false }) };
+          } catch {
+            return { interest, unit: null };
+          }
+        }),
+      );
+      setInterests(rows);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load units.");
+      setError(err instanceof ApiError ? err.message : "Could not load your interests.");
+      setInterests([]);
     }
   }
 
@@ -134,31 +155,6 @@ export default function TenantPage() {
     setTenancyIdInput("");
   }
 
-  async function requestVisit(unitId: string) {
-    const slot = window.prompt("Proposed visit time (ISO 8601, e.g. 2026-08-15T10:00:00Z):", "2026-08-15T10:00:00Z");
-    if (!slot) return;
-    try {
-      await api(`/units/${unitId}/visit-requests`, { method: "POST", body: { requested_slots: [{ start: slot }] } });
-      flash("Visit requested — the landlord's response will appear in Notifications.");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not request a visit.");
-    }
-  }
-
-  // Lighter-weight than requesting a visit — no scheduling, just flags
-  // interest so the landlord can create a tenancy for this tenant with one
-  // click from their own dashboard. Idempotent on the backend, so a second
-  // click is harmless even if this optimistic UI state were ever lost.
-  async function expressInterest(unitId: string) {
-    try {
-      await api(`/units/${unitId}/interest`, { method: "POST" });
-      setInterestedUnitIds((prev) => new Set(prev).add(unitId));
-      flash("Interest sent — the landlord has been notified.");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not express interest.");
-    }
-  }
-
   async function payRent(tenancy: Tenancy) {
     const cycles = payCycles[tenancy.id] ?? 1;
     const cycleMonths = BILLING_CYCLE_MONTHS[tenancy.billing_cycle] ?? 1;
@@ -171,8 +167,9 @@ export default function TenantPage() {
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: { amount, currency: tenancy.currency, period_start: start, period_end: end, provider: "campay" },
       });
+      const covered = describeCoveredMonths(start, end);
       flash(
-        `Payment for ${start} → ${end} (${cycles} ${tenancy.billing_cycle} cycle${cycles > 1 ? "s" : ""}, ${amount} ${tenancy.currency}) submitted (status: pending). The simulated aggregator confirms in ~4s.`,
+        `Payment of ${formatMoney(amount)} ${tenancy.currency} submitted — covers ${covered.label} (${covered.count} month${covered.count === 1 ? "" : "s"}). The next payment will then be due ${formatDate(addOneDayTo(end, 1))}. The simulated aggregator confirms in ~4s.`,
       );
       // Poll briefly so the demo shows the balance update live without a manual refresh.
       for (let i = 0; i < 6; i++) {
@@ -220,144 +217,170 @@ export default function TenantPage() {
   if (!ready) return null;
 
   return (
-    <>
-      <NavBar />
-      <div className="page">
-        <h1>Tenant tools</h1>
-        <ErrorNotice error={error} notice={notice} />
+    <div className="page">
+      <h1>My rentals</h1>
+      <p className="muted" style={{ fontSize: 14.5, margin: "0 0 18px" }}>
+        Your tenancies, rent and the homes you’ve shown interest in.
+      </p>
 
-        <div className="card">
-          <h2>Your user ID</h2>
-          <p className="muted">
-            Share this with a landlord so they can create a tenancy for you — this demo has no search-by-phone endpoint.
-          </p>
-          <input readOnly value={userId} onClick={(e) => (e.target as HTMLInputElement).select()} />
-        </div>
-
-        <div className="card">
-          <h2>Browse available units</h2>
-          {units.length === 0 ? (
-            <p className="muted">No vacant units listed yet.</p>
-          ) : (
-            <ul className="list">
-              {units.map((u) => (
-                <li key={u.id} className="list-item">
-                  <span>
-                    <strong>{u.label ?? "Unnamed unit"}</strong> — {u.property.city} — {u.rent_amount} {u.currency}
-                    {u.property.verified && <span className="badge active" style={{ marginLeft: 6 }}>verified</span>}
-                    {u.property.property_type && (
-                      <span className="badge" style={{ marginLeft: 6 }}>{PROPERTY_TYPE_LABELS[u.property.property_type]}</span>
-                    )}
-                    {(u.bedrooms || u.bathrooms) && (
-                      <span className="muted">
-                        {" "}
-                        · {u.bedrooms ?? "—"} bed / {u.bathrooms ?? "—"} bath
-                      </span>
-                    )}
-                    <div>
-                      {[...u.facilities, ...u.property.facilities].map((f) => (
-                        <span key={f} className="tag">{facilityLabel(f)}</span>
-                      ))}
-                    </div>
-                  </span>
-                  <span className="row">
-                    <button className="secondary" onClick={() => requestVisit(u.id)}>
-                      Request a visit
-                    </button>
-                    <button onClick={() => expressInterest(u.id)} disabled={interestedUnitIds.has(u.id)}>
-                      {interestedUnitIds.has(u.id) ? "Interested ✓" : "Express interest"}
-                    </button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="card">
-          <h2>My tenancies</h2>
-          <p className="muted">
-            Loaded automatically once your landlord creates a tenancy for you.{" "}
-            <a onClick={() => setShowLookup((v) => !v)} style={{ cursor: "pointer" }}>
-              {showLookup ? "Hide" : "Don't see one? Add by ID"}
-            </a>
-          </p>
-          {showLookup && (
-            <form onSubmit={lookUpTenancy} className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>Look up a tenancy by ID</label>
-                <input value={tenancyIdInput} onChange={(e) => setTenancyIdInput(e.target.value)} placeholder="tenancy id from your landlord" />
-              </div>
-              <button type="submit">Add</button>
-            </form>
-          )}
-
-          {Object.values(tenancies).length === 0 ? (
-            <p className="muted">No tenancies yet. Ask your landlord to create one for you using your user ID above.</p>
-          ) : (
-            <ul className="list">
-              {Object.values(tenancies).map((t) => (
-                <li key={t.id} className="list-item" style={{ alignItems: "flex-start" }}>
-                  <span>
-                    Unit <span className="muted">{t.unit_id.slice(0, 8)}</span> — {t.rent_amount} {t.currency}/{t.billing_cycle}{" "}
-                    <span className={`badge ${t.status}`}>{t.status}</span>
-                    <br />
-                    Balance: <strong>{t.current_balance ?? "—"}</strong> · Paid through: <strong>{t.paid_through_date ?? "—"}</strong>
-                    {t.months_paid_ahead > 0 && (
-                      <span className="badge active" style={{ marginLeft: 6 }}>
-                        {t.months_paid_ahead} month{t.months_paid_ahead > 1 ? "s" : ""} ahead
-                      </span>
-                    )}
-                    <br />
-                    Contract:{" "}
-                    <span className={`badge ${contracts[t.id]?.status ?? t.contract_status ?? ""}`}>
-                      {contracts[t.id]?.status ?? t.contract_status ?? "none yet"}
-                    </span>
-                    {t.recent_ledger_entries && t.recent_ledger_entries.length > 0 && (
-                      <div className="muted">
-                        Recent ledger: {t.recent_ledger_entries.map((e) => `${e.type} ${e.amount} (bal ${e.running_balance})`).join(", ")}
-                      </div>
-                    )}
-                  </span>
-                  <span className="row" style={{ alignItems: "center" }}>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Cycles to pay</label>
-                      <select
-                        value={payCycles[t.id] ?? 1}
-                        onChange={(e) => setPayCycles((prev) => ({ ...prev, [t.id]: Number(e.target.value) }))}
-                      >
-                        {Array.from({ length: Math.max(1, t.max_advance_months) }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>
-                            {n} {t.billing_cycle} cycle{n > 1 ? "s" : ""} ({Number(t.rent_amount) * n} {t.currency})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <button onClick={() => payRent(t)} disabled={payingId === t.id}>
-                      {payingId === t.id ? "Confirming…" : "Pay rent"}
-                    </button>
-                    <button className="secondary" onClick={() => generateContract(t.id)}>
-                      Generate contract
-                    </button>
-                    <button className="secondary" onClick={() => fileComplaint(t.id)}>
-                      File a complaint
-                    </button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-    </>
-  );
-}
-
-function ErrorNotice({ error, notice }: { error: string | null; notice: string | null }) {
-  return (
-    <>
       {error && <div className="error">{error}</div>}
       {notice && <div className="success-box">{notice}</div>}
-    </>
+
+      <div className="card">
+        <h2>My tenancies</h2>
+        <p className="muted" style={{ margin: 0 }}>
+          Loaded automatically once your landlord creates a tenancy for you.{" "}
+          <a href="#lookup" onClick={(e) => { e.preventDefault(); setShowLookup((v) => !v); }}>
+            {showLookup ? "Hide" : "Don’t see one? Add by ID"}
+          </a>
+        </p>
+        {showLookup && (
+          <form id="lookup" onSubmit={lookUpTenancy} className="row" style={{ marginTop: 12 }}>
+            <div className="field" style={{ flex: 1, margin: 0 }}>
+              <label>Look up a tenancy by ID</label>
+              <input value={tenancyIdInput} onChange={(e) => setTenancyIdInput(e.target.value)} placeholder="tenancy id from your landlord" />
+            </div>
+            <button type="submit">Add</button>
+          </form>
+        )}
+
+        {Object.values(tenancies).length === 0 ? (
+          <p className="muted" style={{ marginTop: 14 }}>
+            No tenancies yet. Once you’ve shown interest in a home, the landlord can set up your tenancy in one click —
+            or share your user ID: <code>{userId}</code>
+          </p>
+        ) : (
+          <ul className="list">
+            {Object.values(tenancies).map((t) => (
+              <li key={t.id} className="list-item" style={{ alignItems: "flex-start" }}>
+                <span>
+                  <strong>
+                    {formatMoney(t.rent_amount)} {t.currency}
+                  </strong>{" "}
+                  / {t.billing_cycle} · Unit <span className="muted">{t.unit_id.slice(0, 8)}</span>{" "}
+                  <span className={`badge ${t.status}`}>{t.status}</span>
+                  <br />
+                  <span className="due-line">
+                    <span>
+                      Billing {t.start_date > today ? "starts" : "started"} <strong>{formatDate(t.start_date)}</strong>
+                    </span>
+                    {t.next_payment_due_date && (
+                      <span>
+                        Next payment due <strong>{formatDate(t.next_payment_due_date)}</strong>
+                        {dueStatus(t.next_payment_due_date, today) === "overdue" && (
+                          <span className="badge failed" style={{ marginLeft: 6 }}>overdue</span>
+                        )}
+                        {dueStatus(t.next_payment_due_date, today) === "today" && (
+                          <span className="badge pending" style={{ marginLeft: 6 }}>due today</span>
+                        )}
+                      </span>
+                    )}
+                  </span>
+                  Balance: <strong>{t.current_balance ?? "—"}</strong> · Paid through:{" "}
+                  <strong>{t.paid_through_date ? formatDate(t.paid_through_date) : "—"}</strong>
+                  {t.months_paid_ahead > 0 && (
+                    <span className="badge active" style={{ marginLeft: 6 }}>
+                      {t.months_paid_ahead} month{t.months_paid_ahead > 1 ? "s" : ""} ahead
+                    </span>
+                  )}
+                  <br />
+                  Contract:{" "}
+                  <span className={`badge ${contracts[t.id]?.status ?? t.contract_status ?? ""}`}>
+                    {contracts[t.id]?.status ?? t.contract_status ?? "none yet"}
+                  </span>
+                  {t.recent_ledger_entries && t.recent_ledger_entries.length > 0 && (
+                    <PaymentHistory
+                      entries={t.recent_ledger_entries}
+                      currency={t.currency}
+                      nextPaymentDue={t.next_payment_due_date}
+                      today={today}
+                    />
+                  )}
+                  <HomeChanges tenancyId={t.id} />
+                </span>
+                <span className="row" style={{ alignItems: "center" }}>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Cycles to pay</label>
+                    <select
+                      value={payCycles[t.id] ?? 1}
+                      onChange={(e) => setPayCycles((prev) => ({ ...prev, [t.id]: Number(e.target.value) }))}
+                    >
+                      {Array.from({ length: Math.max(1, t.max_advance_months) }, (_, i) => i + 1).map((n) => (
+                        <option key={n} value={n}>
+                          {n} {t.billing_cycle} cycle{n > 1 ? "s" : ""} ({formatMoney(Number(t.rent_amount) * n)} {t.currency})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button onClick={() => payRent(t)} disabled={payingId === t.id}>
+                    {payingId === t.id ? "Confirming…" : "Pay rent"}
+                  </button>
+                  <button className="secondary" onClick={() => generateContract(t.id)}>
+                    Generate contract
+                  </button>
+                  <button className="secondary" onClick={() => fileComplaint(t.id)}>
+                    File a complaint
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <h2 style={{ margin: 0 }}>Homes you’re interested in</h2>
+          <Link href="/" className="btn btn-secondary">
+            <IconSearch size={16} /> Browse more homes
+          </Link>
+        </div>
+        {interests === null ? (
+          <p className="muted" style={{ marginTop: 14 }}>
+            Loading…
+          </p>
+        ) : interests.length === 0 ? (
+          <p className="muted" style={{ marginTop: 14 }}>
+            You haven’t shown interest in any home yet. Browse the listings and tap “I’m interested” — the landlord is
+            notified straight away.
+          </p>
+        ) : (
+          <ul className="list">
+            {interests.map(({ interest, unit }) => (
+              <li key={interest.id} className="list-item">
+                <span className="item-main">
+                  {unit?.photos[0] ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img className="thumb" src={unit.photos[0].url} alt="" loading="lazy" />
+                  ) : (
+                    <span className="thumb thumb-empty">
+                      <IconImage size={22} />
+                    </span>
+                  )}
+                  <span>
+                    <strong>{unit?.label ?? "Listing no longer available"}</strong>{" "}
+                    <span className={`badge ${interest.status}`}>{interest.status === "converted" ? "tenancy created" : "waiting for landlord"}</span>
+                    <br />
+                    {unit ? (
+                      <span className="muted">
+                        <IconPin size={13} /> {[unit.property.name, unit.property.city].filter(Boolean).join(" · ")} ·{" "}
+                        {formatMoney(unit.rent_amount)} {unit.currency}/{unit.billing_cycle}
+                      </span>
+                    ) : (
+                      <span className="muted">It may have been rented or taken down.</span>
+                    )}
+                  </span>
+                </span>
+                {unit && (
+                  <Link href={`/units/${unit.id}`} className="btn btn-secondary">
+                    View <IconArrowRight size={15} />
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }

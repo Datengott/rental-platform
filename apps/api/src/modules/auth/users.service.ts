@@ -103,6 +103,53 @@ export class UsersService {
     this.events.emit(USER_ROLE_GRANTED, { userId, role } satisfies UserRoleGrantedEvent);
   }
 
+  // Public interface for the Admin module's kyc-queue view (never a direct
+  // Prisma read of Auth's users table, per CLAUDE.md's cross-module rule).
+  // "Pending" = has submitted an ID document that no admin has acted on yet.
+  // Ownership-verification review is a separate, not-yet-built flow — see the
+  // Admin module's README.md entry for why `ownership_doc_url` isn't in scope
+  // here (same "dead schema, no writer" situation as other deferred fields).
+  async listPendingKyc(): Promise<
+    {
+      id: string;
+      fullName: string | null;
+      phoneNumber: string;
+      locale: string;
+      idDocumentType: string | null;
+      idDocumentRef: string | null;
+      idDocumentUrl: string | null;
+      submittedAt: Date;
+    }[]
+  > {
+    const users = await this.prisma.user.findMany({
+      where: { idDocumentUrl: { not: null }, kycVerifiedAt: null },
+      // `updatedAt` is a proxy for "submitted at" — it's bumped by the same
+      // update that stores the document, and nothing else in this MVP updates
+      // a user's own row afterwards before an admin reviews it.
+      orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        fullName: true,
+        phoneNumber: true,
+        locale: true,
+        idDocumentType: true,
+        idDocumentRef: true,
+        idDocumentUrl: true,
+        updatedAt: true,
+      },
+    });
+    return users.map((u) => ({
+      id: u.id,
+      fullName: u.fullName,
+      phoneNumber: u.phoneNumber,
+      locale: u.locale,
+      idDocumentType: u.idDocumentType,
+      idDocumentRef: u.idDocumentRef,
+      idDocumentUrl: u.idDocumentUrl,
+      submittedAt: u.updatedAt,
+    }));
+  }
+
   // Public interface for other modules that need to validate a user id
   // (e.g. Tenancies validating the tenant_id it's given) without a direct
   // Prisma read of Auth's tables, per CLAUDE.md's cross-module rule.

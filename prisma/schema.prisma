@@ -167,6 +167,15 @@ model Unit {
   billingCycle BillingCycle @default(monthly) @map("billing_cycle")
   status       UnitStatus   @default(draft)
   description  String?
+  // Current moderation state (added 2026-09-24, Admin module) — set only by
+  // an admin action, never by the landlord (not on UpdateUnitDto). While
+  // flagged, the unit is excluded from public search/detail regardless of
+  // `status`. Non-null values pair with `admin_actions_log` rows recording
+  // the same action for durable history; these columns are just "is this
+  // currently flagged", not the audit trail itself.
+  flaggedAt    DateTime?    @map("flagged_at")
+  flagReason   String?      @map("flag_reason")
+  flaggedBy    String?      @map("flagged_by") // references users.id — not a Prisma relation, per CLAUDE.md
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 
@@ -175,6 +184,7 @@ model Unit {
 
   @@index([status])
   @@index([propertyId])
+  @@index([flaggedAt])
   @@map("units")
 }
 
@@ -191,6 +201,48 @@ model UnitPhoto {
   unit Unit @relation(fields: [unitId], references: [id], onDelete: Cascade)
 
   @@map("unit_photos")
+}
+
+// Audit trail of landlord edits to properties and units (added 2026-09-20,
+// demo feedback: landlords can now edit everything about their listings, and
+// the platform must be able to tell when details were changed — especially
+// after a tenant already moved in). APPEND-ONLY, same spirit as
+// ledger_entries: application code only ever INSERTs into this table, never
+// UPDATEs or DELETEs, so it stays trustworthy as evidence.
+enum ListingEntityType {
+  property
+  unit
+}
+
+model ListingChange {
+  id           String            @id @default(uuid())
+  entityType   ListingEntityType @map("entity_type")
+  // Always set — a unit change records its property too, so "everything that
+  // happened at this property" is one query.
+  propertyId   String            @map("property_id")
+  unitId       String?           @map("unit_id")
+  // Name/label at the moment of the change, since either can be edited later.
+  entityLabel  String?           @map("entity_label")
+  changedBy    String            @map("changed_by") // references users.id — NOT a Prisma relation.
+  // 'updated' | 'photo_added' | 'photo_removed' | 'cover_photo_changed'
+  action       String
+  // [{ field, from, to }] — only the fields that actually changed.
+  changes      Json
+  note         String?
+  // Units, among those this change touched, that had a tenant in residence
+  // (status occupied or notice_given) when it was made. Non-empty means "the
+  // landlord changed this while someone was living there".
+  occupiedUnitIds          String[]  @default([]) @map("occupied_unit_ids")
+  // Whether the property carried the ownership-verified badge at the time — a
+  // change to a verified property's address is what an admin re-checks.
+  propertyVerifiedAtChange Boolean   @map("property_verified_at_change")
+  createdAt    DateTime          @default(now()) @map("created_at")
+
+  @@index([propertyId, createdAt])
+  @@index([unitId, createdAt])
+  @@index([changedBy, createdAt])
+  @@index([createdAt])
+  @@map("listing_changes")
 }
 
 // ============================================================
@@ -337,6 +389,12 @@ model TerminationNotice {
 enum PaymentProvider {
   campay
   monetbil
+  // Rent the landlord records as already received outside the platform (e.g.
+  // cash paid upfront when the tenancy is created) — added 2026-09-20. Never
+  // accepted from the client-facing API (CreatePaymentDto still only allows
+  // 'campay' | 'monetbil'); only PaymentsService.recordPrepaidRent writes it,
+  // so a tenant can't mark their own rent as paid.
+  offline
 }
 
 enum PaymentStatus {
@@ -637,6 +695,33 @@ model ComplaintUpdate {
   complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
 
   @@map("complaint_updates")
+}
+
+// ============================================================
+// B.9 — Admin / Ops Module
+// ============================================================
+
+// The only table Admin owns outright (per the schema doc's B.9: "mostly a
+// read/action layer over other modules"). Every state-changing admin action
+// writes one row here — either directly (the Admin module's own endpoints,
+// e.g. flagging/removing a listing) or via an @OnEvent listener reacting to
+// an action another module's own endpoint triggered (e.g. Auth's existing
+// POST /admin/users/{id}/kyc/approve, via user.kyc_tier_changed) — so this
+// stays a pure audit trail, never a bypass around another module's own API,
+// per CLAUDE.md's cross-module rule.
+model AdminActionLog {
+  id         String   @id @default(uuid())
+  adminId    String   @map("admin_id") // references users.id — not a Prisma relation
+  actionType String   @map("action_type") // 'kyc_approved' | 'listing_flagged' | 'listing_unflagged' | 'listing_removed'
+  targetType String   @map("target_type") // 'user' | 'unit'
+  targetId   String   @map("target_id")
+  detail     Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([targetType, targetId, createdAt])
+  @@index([adminId, createdAt])
+  @@index([createdAt])
+  @@map("admin_actions_log")
 }
 
 // ============================================================

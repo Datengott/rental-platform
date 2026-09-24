@@ -9,6 +9,7 @@
 // landlord's copy must be actionable without looking anything up) without
 // doubling the number of templates.
 
+import { addDays, describeCoveredMonths, formatLongDate } from '../../common/format/period';
 import {
   RENT_EXPIRY_DUE_TODAY,
   RENT_EXPIRY_FIRST_REMINDER_DUE,
@@ -20,6 +21,11 @@ export interface NotificationContext {
   tenantName?: string;
   landlordName?: string;
   unitLabel?: string;
+  // payment.confirmed: raw ISO dates; the wording (month names, long dates,
+  // French/English) is produced at render time so it matches the recipient's
+  // locale. paidAt is the day the payment was made/confirmed.
+  paidAt?: string;
+  periodStart?: string;
   periodEnd?: string;
   paidThroughDate?: string;
   effectiveDate?: string;
@@ -54,16 +60,34 @@ export function renderNotificationContent(
             body: `A termination notice has been issued for ${unit}, effective ${context.effectiveDate}. See the document in the app.`,
           };
 
-    case 'payment.confirmed':
+    case 'payment.confirmed': {
+      // Say when it was paid, which month(s) it covers, and when the next
+      // payment is expected. Falls back to the older "covered through" wording
+      // if a caller didn't supply the full period.
+      if (!context.periodStart || !context.periodEnd || !context.paidAt) {
+        return locale === 'fr'
+          ? {
+              subject: 'Paiement de loyer confirmé',
+              body: `Paiement reçu pour ${unit}. Loyer couvert jusqu'au ${context.periodEnd}. Reçu disponible dans l'application.`,
+            }
+          : {
+              subject: 'Rent payment confirmed',
+              body: `Payment received for ${unit}. Rent covered through ${context.periodEnd}. Receipt available in the app.`,
+            };
+      }
+      const months = describeCoveredMonths(context.periodStart, context.periodEnd, locale);
+      const paidOn = formatLongDate(context.paidAt, locale);
+      const nextDue = formatLongDate(addDays(context.periodEnd, 1), locale);
       return locale === 'fr'
         ? {
             subject: 'Paiement de loyer confirmé',
-            body: `Paiement reçu pour ${unit}. Loyer couvert jusqu'au ${context.periodEnd}. Reçu disponible dans l'application.`,
+            body: `Paiement reçu le ${paidOn} pour ${unit}. Mois couverts : ${months.label} (${months.count} mois). Prochain paiement attendu le ${nextDue}. Reçu disponible dans l'application.`,
           }
         : {
             subject: 'Rent payment confirmed',
-            body: `Payment received for ${unit}. Rent covered through ${context.periodEnd}. Receipt available in the app.`,
+            body: `Payment received on ${paidOn} for ${unit}. Covers ${months.label} (${months.count} month${months.count === 1 ? '' : 's'}). Next payment due ${nextDue}. Receipt available in the app.`,
           };
+    }
 
     case 'payment.failed':
       return locale === 'fr'

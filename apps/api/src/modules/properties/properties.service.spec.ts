@@ -1,22 +1,31 @@
 import { NotFoundException } from '@nestjs/common';
 import { PropertiesService } from './properties.service';
 
+const dec = (value: string) => ({ toString: () => value });
+
 function buildPrismaMock() {
   return {
-    property: { create: jest.fn(), findUnique: jest.fn() },
-    unit: { create: jest.fn() },
+    property: { create: jest.fn(), findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn() },
+    unit: { create: jest.fn(), findMany: jest.fn() },
+    $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
   };
 }
 
 describe('PropertiesService', () => {
   let prisma: ReturnType<typeof buildPrismaMock>;
   let usersService: { ensureRole: jest.Mock };
+  let listingChanges: { buildRecord: jest.Mock };
+  // The audit record the service handed to the change log (first call).
+  function recordedChange<T>(): T {
+    return (listingChanges.buildRecord.mock.calls[0] as [T])[0];
+  }
   let service: PropertiesService;
 
   beforeEach(() => {
     prisma = buildPrismaMock();
     usersService = { ensureRole: jest.fn().mockResolvedValue(undefined) };
-    service = new PropertiesService(prisma as never, usersService as never);
+    listingChanges = { buildRecord: jest.fn().mockResolvedValue({}) };
+    service = new PropertiesService(prisma as never, usersService as never, listingChanges as never);
   });
 
   describe('createProperty', () => {
@@ -44,6 +53,71 @@ describe('PropertiesService', () => {
 
       expect(usersService.ensureRole).toHaveBeenCalledWith('user-1', 'landlord');
       expect(result).toMatchObject({ id: 'prop-1', landlord_id: 'user-1', ownership_verified_at: null });
+    });
+  });
+
+  describe('updateProperty', () => {
+    const propertyRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'prop-1',
+      landlordId: 'user-1',
+      name: 'Résidence Bonapriso',
+      propertyType: 'residential',
+      facilities: ['gated'],
+      addressLine: '12 Rue de la Paix',
+      city: 'Douala',
+      region: 'Littoral',
+      latitude: dec('4.05'),
+      longitude: dec('9.7'),
+      ownershipVerifiedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    });
+
+    it('records the changed fields, and which units had a tenant living in them at the time', async () => {
+      prisma.property.findUnique.mockResolvedValue(propertyRow({ ownershipVerifiedAt: new Date() }));
+      prisma.unit.findMany.mockResolvedValue([{ id: 'unit-9' }]);
+      prisma.property.update.mockResolvedValue(propertyRow({ addressLine: '99 New Street' }));
+
+      await service.updateProperty('user-1', 'prop-1', {
+        address_line: '99 New Street',
+        city: 'Douala', // unchanged
+        change_note: 'Moved the gate',
+      });
+
+      const record = recordedChange<{
+        entityType: string;
+        changes: { field: string; from: unknown; to: unknown }[];
+        occupiedUnitIds: string[];
+        propertyVerifiedAtChange: boolean;
+        note: string;
+      }>();
+      expect(record.entityType).toBe('property');
+      expect(record.changes).toEqual([{ field: 'address_line', from: '12 Rue de la Paix', to: '99 New Street' }]);
+      expect(record.occupiedUnitIds).toEqual(['unit-9']);
+      expect(record.propertyVerifiedAtChange).toBe(true);
+      expect(record.note).toBe('Moved the gate');
+      expect(prisma.unit.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { propertyId: 'prop-1', status: { in: ['occupied', 'notice_given'] } } }),
+      );
+    });
+
+    it('does nothing when nothing changed', async () => {
+      prisma.property.findUnique.mockResolvedValue(propertyRow());
+
+      await service.updateProperty('user-1', 'prop-1', { name: 'Résidence Bonapriso', latitude: 4.05 });
+
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(listingChanges.buildRecord).not.toHaveBeenCalled();
+    });
+
+    it("404s for someone else's property, changing and recording nothing", async () => {
+      prisma.property.findUnique.mockResolvedValue(propertyRow({ landlordId: 'someone-else' }));
+
+      await expect(service.updateProperty('user-1', 'prop-1', { city: 'Yaoundé' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(listingChanges.buildRecord).not.toHaveBeenCalled();
     });
   });
 
