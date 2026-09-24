@@ -147,6 +147,36 @@ tested; unchecked = not started or schema-only.
       `payments.service.spec.ts` (mocked) and `apps/api/test/payments.e2e-spec.ts`
       (real Postgres, including a real signed webhook round-trip and the
       reconciliation sweep).
+      **Rent paid upfront (added 2026-09-20):** `POST /tenancies` takes an optional
+      `prepaid_months` — rent the tenant already paid the landlord in cash. It is
+      recorded through this module as a real confirmed payment with provider
+      `offline` (append-only ledger credit, receipt, `payment.confirmed` →
+      `paid_through_date` advances and the tenant is notified), never by writing
+      to the ledger or `paid_through_date` directly. `PaymentsService.
+      planPrepaidRent` validates first (Tenancies calls it before creating
+      anything, so a bad value can't leave a half-created tenancy) and
+      `recordPrepaidRent` records after. Not capped by `max_advance_months` (that
+      limits what a tenant may pay through the platform; this is the landlord
+      stating money they received) and `offline` is rejected on the tenant-facing
+      payment endpoint, so a tenant can't mark their own rent paid. The tenant
+      and landlord dashboards show it as a "Paid upfront" entry in the payment
+      history plus the paid-through date and months ahead.
+      **What a payment "says" (added 2026-09-20):** every confirmed payment now
+      states when it was made (`paid_at`), which month(s) it covers
+      (`period_start`/`period_end`/`months_covered`, worded like "September –
+      November 2026 · 3 months") and when the next payment is due
+      (`next_payment_due_date` on every tenancy response — the start date until
+      something is paid, then the day after `paid_through_date`). The same three
+      facts are in the ledger API, both dashboards, the `payment.confirmed`
+      notification (FR/EN) and the receipt, all worded by one shared helper
+      (`common/format/period.ts`). Billing starts on the tenancy's `start_date`,
+      which the landlord can set to something other than the creation day
+      (`422 PAYMENT_BEFORE_TENANCY_START` for earlier periods). For rent recorded
+      as paid upfront, an optional `prepaid_paid_on` lets the landlord say the day
+      the tenant actually paid (e.g. move-in day) rather than the day it was
+      recorded; the ledger row's own `created_at` still records when it was
+      entered. The first period follows the existing calendar-month convention: a
+      mid-month start date is priced as that whole month.
 - [x] **Contracts** — document generation only. `POST /tenancies/{id}/contracts`
       generates a single-locale lease document (FR or EN, defaulting to the
       requester's own stored locale) from the tenancy/unit/party data, accessible
@@ -260,6 +290,63 @@ tested; unchecked = not started or schema-only.
       mirrors the landlord one) — before that, a tenant could only find their own
       tenancy by having the id read out to them.
 
+      **Landing page and listings (2026-09-20)** — `/` is now the public listings
+      browser instead of a redirect: hero + search (city, type, bedrooms, max rent;
+      accent-insensitive, so "Yaounde" finds "Yaoundé"), type filter pills, sort,
+      and a card grid with cover photos, price, verified/type badges, amenities and
+      an **"I'm interested"** button. `/units/[id]` is the detail page (photo
+      gallery + lightbox, amenities, sticky booking card with "I'm interested" and
+      "Request a visit"). A signed-out visitor who clicks "I'm interested" is sent
+      to sign in and the click is remembered, so the interest is sent
+      automatically when they land back — they don't have to find the button
+      again. The sign-in page shows a "Demo accounts" helper (only when
+      `NEXT_PUBLIC_SHOW_DEMO_LOGINS=true`, set in `docker-compose.yml`). The
+      landlord dashboard is now tabbed (Properties & units / Tenants & tenancies /
+      Requests) with photo thumbnails, and the tenant dashboard replaced its
+      "browse" card with a link to the landing page plus a "Homes you're
+      interested in" list. Backend additions: public `GET /units/{id}`, `total` +
+      `min_bedrooms` + `property_type` on search, `GET /tenants/me/interests`,
+      static serving of listing photos at `/media/unit-photos/` (only that folder),
+      the seed script, and a guarded demo login code — see
+      `docs/api-specification.md` Sections 4-5 and "Sample data" above. Design is
+      hand-written CSS (no framework, no web-font download).
+
+      **Editing listings, with a tamper-evident change history (2026-09-20)** —
+      landlords can edit everything about their properties (name, type, address,
+      region, coordinates, facilities) and units (label, listed rent, billing cycle,
+      beds/baths, size, description, facilities, vacant/reserved) plus remove photos
+      and pick the cover, from inline editors on the landlord dashboard
+      (`PATCH /properties/{id}`, `PATCH /units/{id}`, `DELETE /units/{id}/photos/{id}`,
+      `POST /units/{id}/photos/{id}/cover`). Every real change is written to a new
+      **append-only** `listing_changes` table in the *same transaction* as the edit
+      (field-level before/after, who, when, an optional reason), together with
+      whether a tenant was living in the affected unit(s) at the time — so a
+      landlord quietly changing details after move-in is visible. Three views:
+      the landlord's own "Change history" tab (with a while-a-tenant-lived-there
+      filter), a "Changes to your home" section on each tenancy in the tenant's
+      dashboard (`GET /tenancies/{id}/listing-changes`, edits since the tenancy was
+      created, landlord identity omitted), and an admin page at `/dashboard/admin`
+      (`GET /admin/listing-changes`, with who made each change). Decisions worth
+      knowing, each also noted in the API spec:
+      - "Living there" = unit status `occupied` or `notice_given`; Properties owns
+        unit status (driven by tenancy events), so this needs no cross-module read.
+      - Editing a unit's **listed** rent does not touch an existing tenancy's agreed
+        `rent_amount`; the editor says so and the change is logged.
+      - Editing an ownership-verified property does **not** clear its verification
+        (that is an admin decision) — the record carries `property_verified_at_change`
+        so a reviewer can spot e.g. an address change on a verified property.
+      - Photo *additions* are only logged while a tenant is living in the unit (the
+        first photos of a new listing are setup, not edits). Removed photos keep
+        their file in storage so the record still points at what the listing showed.
+      - An edit that changes nothing writes no record; unchanged values in a PATCH
+        are ignored. Not built: notifying the tenant when their landlord edits
+        (they can see it in the dashboard; pushing it would be a new notification
+        template + routing entry).
+      - `UnitStatus` transitions are unchanged — landlords may only toggle
+        `vacant ⇄ reserved`; removing the last photo of a vacant unit sends it back
+        to `draft`, the mirror of the existing first-photo rule.
+      Migration `20260920093733_add_listing_changes`; schema in the schema doc's B.2.
+
       Added 2026-09-18, after a stakeholder-demo pass surfaced further product
       feedback:
       - **Property/unit detail**: `property_type` (`residential`/`commercial`/
@@ -328,6 +415,31 @@ npm run prisma:migrate -- --name init
 # 6. Start the API and worker in watch mode
 docker compose up
 ```
+
+### Sample data and demo accounts
+
+`docker compose up` gives you an empty database. To see the platform with real-looking
+content, load the demo data (idempotent — safe to re-run, e.g. after the e2e suite, which
+wipes the shared dev database):
+
+```bash
+npm run seed
+```
+
+This creates **7 properties / 15 units** across Douala, Yaoundé, Buea and Limbe (homes and
+offices, with real photos from `apps/api/seed-assets/`, credited in `CREDITS.md`), plus two
+demo accounts. Sign in at `http://localhost:3001` with a phone number and a one-time code:
+
+| Account | Phone | One-time code |
+|---|---|---|
+| Admin (also the landlord who owns the sample listings) | `+237600000001` | `123456` |
+| Demo tenant (has a tenancy and one expressed interest) | `+237600000002` | `123456` |
+
+The fixed code is a dev/demo convenience, not a real credential: it only applies to the
+two numbers listed in `DEMO_ACCOUNT_PHONES`, only when `DEMO_STATIC_OTP` is set (it is, in
+`docker-compose.yml`), and the API **refuses it outright when `NODE_ENV=production`**.
+Every other number still gets a random code (printed by the SMS stub — `docker compose
+logs api`). Never set `DEMO_STATIC_OTP` anywhere real users exist.
 
 The API will be available at `http://localhost:3000`. Confirm `/health` responds, then
 open `http://localhost:3000/docs` for interactive Swagger docs — use the "Authorize"

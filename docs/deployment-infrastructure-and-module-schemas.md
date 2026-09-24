@@ -256,17 +256,47 @@ CREATE TABLE unit_photos (
     sort_order          SMALLINT NOT NULL DEFAULT 0,
     uploaded_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Added 2026-09-20. APPEND-ONLY audit trail of landlord edits to properties/units
+-- (never UPDATE or DELETE from application code — same rule as ledger_entries).
+-- Written in the same transaction as the edit it describes.
+CREATE TYPE listing_entity_type AS ENUM ('property', 'unit');
+CREATE TABLE listing_changes (
+    id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_type                 listing_entity_type NOT NULL,
+    property_id                 UUID NOT NULL,           -- always set: a unit change records its property too
+    unit_id                     UUID,                    -- set when entity_type = 'unit'
+    entity_label                TEXT,                    -- name/label at the time (either can be edited later)
+    changed_by                  UUID NOT NULL,           -- users.id (no FK: audit rows outlive account changes)
+    action                      TEXT NOT NULL,           -- 'updated' | 'photo_added' | 'photo_removed' | 'cover_photo_changed'
+    changes                     JSONB NOT NULL,          -- [{ field, from, to }], only fields that actually changed
+    note                        TEXT,                    -- landlord's stated reason
+    occupied_unit_ids           UUID[] NOT NULL DEFAULT '{}',  -- affected units with a tenant living there (occupied / notice_given)
+    property_verified_at_change BOOLEAN NOT NULL,        -- property had the ownership-verified badge at the time
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_listing_changes_property ON listing_changes(property_id, created_at);
+CREATE INDEX idx_listing_changes_unit ON listing_changes(unit_id, created_at);
+CREATE INDEX idx_listing_changes_actor ON listing_changes(changed_by, created_at);
+CREATE INDEX idx_listing_changes_created ON listing_changes(created_at);
 ```
 
 **Key endpoints**
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/properties` | Landlord creates a property |
+| PATCH | `/properties/{id}` | Landlord edits any property detail (recorded in `listing_changes`) |
 | POST | `/properties/{id}/units` | Add a unit to a property |
 | POST | `/units/{id}/photos` | Upload geo-tagged photo |
+| DELETE | `/units/{id}/photos/{photoId}` | Remove a photo (recorded) |
+| POST | `/units/{id}/photos/{photoId}/cover` | Make a photo the cover (recorded) |
 | GET | `/units?status=vacant&city=Douala` | Public/tenant search |
 | GET | `/landlords/me/units` | Landlord's occupancy grid source data |
-| PATCH | `/units/{id}` | Update rent/description/status |
+| GET | `/landlords/me/properties` | Landlord's properties with unit / occupied-unit counts |
+| PATCH | `/units/{id}` | Edit any unit detail (recorded in `listing_changes`) |
+| GET | `/landlords/me/listing-changes` | Landlord's own edit history |
+| GET | `/tenancies/{id}/listing-changes` | Edits to a tenancy's home since it began (landlord or tenant) |
+| GET | `/admin/listing-changes` | Admin audit of all edits, filterable to "while a tenant lived there" |
 
 **Events published:** `unit.listed`, `unit.status_changed`
 **Events consumed:** `tenancy.created` (→ set unit status to `occupied`), `tenancy.terminated` (→ set unit status to `vacant`)
@@ -412,7 +442,7 @@ CREATE TABLE payments (
     currency                     CHAR(3) NOT NULL DEFAULT 'XAF',
     period_start                  DATE NOT NULL,           -- rent period this payment covers
     period_end                     DATE NOT NULL,
-    provider                        VARCHAR(20) NOT NULL,   -- 'campay' | 'monetbil'
+    provider                        VARCHAR(20) NOT NULL,   -- 'campay' | 'monetbil' | 'offline' ('offline' added 2026-09-20: rent the landlord records as already received, e.g. cash paid upfront at tenancy creation — written only by the Payments module, never accepted from a client request)
     provider_txn_ref                 VARCHAR(100),           -- external transaction id
     idempotency_key                    VARCHAR(100) NOT NULL UNIQUE, -- client-generated, prevents double-charge
     status                              VARCHAR(20) NOT NULL DEFAULT 'pending',

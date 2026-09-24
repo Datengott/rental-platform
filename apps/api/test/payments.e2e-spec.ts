@@ -235,6 +235,21 @@ describe('Payments module (e2e)', () => {
     expect(conflict.body.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
   });
 
+  it('rejects rent for a period before the tenancy start date — billing starts on that date', async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+    const { tenancyId } = await setUpTenancy(landlord.access_token, tenant.user.id);
+
+    // setUpTenancy starts the tenancy on 2026-09-01.
+    const res = await request(app.getHttpServer())
+      .post(`/v1/tenancies/${tenancyId}/payments`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .set('Idempotency-Key', 'e2e-before-start')
+      .send({ ...validPaymentBody, period_start: '2026-08-01', period_end: '2026-08-31' })
+      .expect(422);
+    expect(res.body.error.code).toBe('PAYMENT_BEFORE_TENANCY_START');
+  });
+
   it('rejects an amount that does not match whole billing cycles of rent', async () => {
     const landlord = await signUp(app, fakeSms, randomPhoneNumber());
     const tenant = await signUp(app, fakeSms, randomPhoneNumber());

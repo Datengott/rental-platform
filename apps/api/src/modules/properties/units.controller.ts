@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -52,10 +53,40 @@ export class UnitsController {
     return this.unitsService.uploadPhoto(user.userId, unitId, dto, file);
   }
 
+  @Delete('units/:id/photos/:photoId')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Remove one of your unit photos (recorded in the change history).' })
+  deletePhoto(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) unitId: string,
+    @Param('photoId', ParseUUIDPipe) photoId: string,
+  ) {
+    return this.unitsService.deletePhoto(user.userId, unitId, photoId);
+  }
+
+  @Post('units/:id/photos/:photoId/cover')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: 'Make a photo the cover (first) photo (recorded in the change history).' })
+  setCoverPhoto(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) unitId: string,
+    @Param('photoId', ParseUUIDPipe) photoId: string,
+  ) {
+    return this.unitsService.setCoverPhoto(user.userId, unitId, photoId);
+  }
+
   @Get('units')
   @ApiOperation({ summary: 'Public search over listed units.' })
   searchUnits(@Query() query: SearchUnitsDto) {
     return this.unitsService.searchUnits(query);
+  }
+
+  @Get('units/:id')
+  @ApiOperation({ summary: 'Public detail for one listed (vacant) unit, with all its photos.' })
+  getPublicUnit(@Param('id', ParseUUIDPipe) unitId: string) {
+    return this.unitsService.getPublicUnit(unitId);
   }
 
   @Get('landlords/me/units')
@@ -69,7 +100,7 @@ export class UnitsController {
   @Patch('units/:id')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('access-token')
-  @ApiOperation({ summary: 'Update rent/description, or move between vacant and reserved.' })
+  @ApiOperation({ summary: 'Edit any detail of your unit (recorded in the change history), or move between vacant and reserved.' })
   updateUnit(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) unitId: string,

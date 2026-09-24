@@ -175,6 +175,87 @@ describe('Properties module (e2e)', () => {
     expect(res.body.id).toBeDefined();
   });
 
+  it('serves a public unit detail with photo URLs for vacant units only, hiding the street address', async () => {
+    const session = await signUp(app, fakeSms, randomPhoneNumber());
+    const propertyRes = await request(app.getHttpServer())
+      .post('/v1/properties')
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ name: 'Residence Test', address_line: '99 Secret Street', city: 'Douala', property_type: 'residential' })
+      .expect(201);
+    const unitRes = await request(app.getHttpServer())
+      .post(`/v1/properties/${propertyRes.body.id}/units`)
+      .set('Authorization', `Bearer ${session.access_token}`)
+      .send({ label: 'Loft', rent_amount: 120000, description: 'Bright loft' })
+      .expect(201);
+
+    // Still a draft: not publicly visible.
+    await request(app.getHttpServer()).get(`/v1/units/${unitRes.body.id}`).expect(404);
+
+    for (const name of ['a.jpg', 'b.jpg']) {
+      await request(app.getHttpServer())
+        .post(`/v1/units/${unitRes.body.id}/photos`)
+        .set('Authorization', `Bearer ${session.access_token}`)
+        .attach('file', Buffer.from('fake-image'), name)
+        .expect(201);
+    }
+
+    const res = await request(app.getHttpServer()).get(`/v1/units/${unitRes.body.id}`).expect(200);
+    expect(res.body).toMatchObject({
+      label: 'Loft',
+      description: 'Bright loft',
+      property: { name: 'Residence Test', city: 'Douala', property_type: 'residential' },
+    });
+    expect(res.body.photos).toHaveLength(2);
+    expect(res.body.photos[0].url).toMatch(/^http:\/\/.+\/media\/unit-photos\/.+\.jpg$/);
+    expect(res.body.photos.map((p: { sort_order: number }) => p.sort_order)).toEqual([0, 1]);
+    // No street address (or landlord identity) on the public payload.
+    expect(JSON.stringify(res.body)).not.toContain('99 Secret Street');
+    expect(res.body.property).not.toHaveProperty('address_line');
+    expect(res.body).not.toHaveProperty('landlord_id');
+  });
+
+  it('filters search by property_type and min_bedrooms, case-insensitive city, and reports a total', async () => {
+    const session = await signUp(app, fakeSms, randomPhoneNumber());
+
+    async function listed(propertyBody: object, unitBody: object) {
+      const property = await request(app.getHttpServer())
+        .post('/v1/properties')
+        .set('Authorization', `Bearer ${session.access_token}`)
+        .send(propertyBody)
+        .expect(201);
+      const unit = await request(app.getHttpServer())
+        .post(`/v1/properties/${property.body.id}/units`)
+        .set('Authorization', `Bearer ${session.access_token}`)
+        .send(unitBody)
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/v1/units/${unit.body.id}/photos`)
+        .set('Authorization', `Bearer ${session.access_token}`)
+        .attach('file', Buffer.from('fake-image'), 'p.jpg')
+        .expect(201);
+      return unit.body.id as string;
+    }
+
+    const villa = await listed(
+      { address_line: '1 A', city: 'Yaounde', property_type: 'residential' },
+      { rent_amount: 500000, bedrooms: 4 },
+    );
+    await listed({ address_line: '2 B', city: 'Yaounde', property_type: 'commercial' }, { rent_amount: 200000 });
+    await listed({ address_line: '3 C', city: 'Douala', property_type: 'residential' }, { rent_amount: 90000, bedrooms: 1 });
+
+    const residentialBig = await request(app.getHttpServer())
+      .get('/v1/units?city=yaounde&property_type=residential&min_bedrooms=3')
+      .expect(200);
+    expect(residentialBig.body.results.map((u: { id: string }) => u.id)).toEqual([villa]);
+    expect(residentialBig.body.total).toBe(1);
+
+    const allYaounde = await request(app.getHttpServer()).get('/v1/units?city=YAOUNDE').expect(200);
+    expect(allYaounde.body.total).toBe(2);
+
+    const commercial = await request(app.getHttpServer()).get('/v1/units?property_type=commercial').expect(200);
+    expect(commercial.body.results).toHaveLength(1);
+  });
+
   it('a new unit starts as draft and does not appear in search', async () => {
     const session = await signUp(app, fakeSms, randomPhoneNumber());
     const { unit } = await createPropertyWithUnit(session.access_token);
@@ -202,7 +283,11 @@ describe('Properties module (e2e)', () => {
 
     const search = await request(app.getHttpServer()).get('/v1/units?city=Douala').expect(200);
     const found = search.body.results.find((u: { id: string }) => u.id === unit.id);
-    expect(found).toMatchObject({ cover_photo_url: photoRes.body.storage_url, property: { verified: false } });
+    // The stored reference is an internal local:// URL; search returns the
+    // browser-loadable /media/... URL for the same file.
+    const storedPath = (photoRes.body.storage_url as string).replace('local://', '');
+    expect(found).toMatchObject({ property: { verified: false } });
+    expect(found.cover_photo_url).toMatch(new RegExp(`^https?://.+/media/${storedPath}$`));
   });
 
   it('rejects adding a unit to a property owned by someone else with 404', async () => {

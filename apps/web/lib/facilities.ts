@@ -3,6 +3,19 @@
 // just a curated starting set so landlords aren't typing free text for the
 // common cases raised in demo feedback.
 
+import type { ComponentType } from "react";
+import {
+  IconBolt,
+  IconCheck,
+  IconDrop,
+  IconGate,
+  IconGuard,
+  IconSnow,
+  IconSofa,
+  IconWell,
+  IconWifi,
+} from "@/components/Icons";
+
 export const PROPERTY_FACILITIES: { value: string; label: string }[] = [
   { value: "gated", label: "Gated compound" },
   { value: "generator", label: "Backup generator" },
@@ -22,6 +35,21 @@ export const PROPERTY_TYPE_LABELS: Record<string, string> = {
   commercial: "Commercial",
   mixed_use: "Mixed use",
 };
+
+const FACILITY_ICONS: Record<string, ComponentType<{ size?: number }>> = {
+  ac: IconSnow,
+  wifi: IconWifi,
+  hot_water: IconDrop,
+  furnished: IconSofa,
+  gated: IconGate,
+  generator: IconBolt,
+  borehole: IconWell,
+  security_personnel: IconGuard,
+};
+
+export function facilityIcon(value: string): ComponentType<{ size?: number }> {
+  return FACILITY_ICONS[value] ?? IconCheck;
+}
 
 export function facilityLabel(value: string): string {
   return (

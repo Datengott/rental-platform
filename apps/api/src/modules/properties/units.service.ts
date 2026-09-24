@@ -1,6 +1,7 @@
 import { HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { UnitStatus } from '@prisma/client';
+import { ListingEntityType, UnitStatus } from '@prisma/client';
 import { ApiException } from '../../common/exceptions/api.exception';
 import {
   UNIT_LISTED,
@@ -10,10 +11,13 @@ import {
 } from '../../common/events/property.events';
 import { PrismaService } from '../../common/prisma.service';
 import { OBJECT_STORAGE, ObjectStorage } from '../../common/storage/object-storage';
+import { toPublicMediaUrl } from '../../common/storage/public-url';
 import { UploadUnitPhotoDto } from './dto/upload-unit-photo.dto';
 import { UpdateUnitDto } from './dto/update-unit.dto';
 import { SearchUnitsDto } from './dto/search-units.dto';
 import { toUnitResponse } from './unit-response.mapper';
+import { applyEdits } from './listing-diff';
+import { ListingChangesService } from './listing-changes.service';
 
 // Manual transitions a landlord can make via PATCH /units/{id}. Everything
 // else is system-driven: draft->vacant happens on first photo upload (below);
@@ -30,7 +34,24 @@ export class UnitsService {
     private readonly prisma: PrismaService,
     private readonly events: EventEmitter2,
     @Inject(OBJECT_STORAGE) private readonly objectStorage: ObjectStorage,
+    private readonly config: ConfigService,
+    private readonly listingChanges: ListingChangesService,
   ) {}
+
+  // A tenant is "in residence" while the unit is occupied or under notice.
+  private inResidence(status: UnitStatus): boolean {
+    return status === UnitStatus.occupied || status === UnitStatus.notice_given;
+  }
+
+  // Where the browser can reach this API's /media/* static route — separate
+  // from the request's own host so it also works behind a proxy/Cloud Run.
+  private publicMediaBase(): string {
+    return this.config.get<string>('API_PUBLIC_URL') ?? `http://localhost:${this.config.get<string>('PORT') ?? 3000}`;
+  }
+
+  private photoUrl(storageUrl: string): string {
+    return toPublicMediaUrl(storageUrl, this.publicMediaBase());
+  }
 
   async uploadPhoto(landlordId: string, unitId: string, dto: UploadUnitPhotoDto, file: Express.Multer.File) {
     if (!file) {
@@ -53,6 +74,23 @@ export class UnitsService {
         sortOrder: photoCount,
       },
     });
+
+    // Adding photos is how a listing gets built, so on a unit nobody lives in
+    // it isn't a "change" worth logging (it would bury the real edits in setup
+    // noise). While a tenant is in residence it IS unusual, and recorded.
+    if (this.inResidence(unit.status)) {
+      await this.listingChanges.buildRecord({
+        entityType: ListingEntityType.unit,
+        propertyId: unit.propertyId,
+        unitId: unit.id,
+        entityLabel: unit.label,
+        changedBy: landlordId,
+        action: 'photo_added',
+        changes: [{ field: 'photo', from: null, to: url }],
+        occupiedUnitIds: [unit.id],
+        propertyVerifiedAtChange: unit.property.ownershipVerifiedAt !== null,
+      });
+    }
 
     // First photo transitions the unit from draft to vacant — PRD Epic 2
     // US-2.1 AC2. Every subsequent photo just attaches to an already-listed unit.
@@ -80,31 +118,48 @@ export class UnitsService {
   async searchUnits(query: SearchUnitsDto) {
     const limit = query.limit ?? 20;
 
-    const units = await this.prisma.unit.findMany({
-      where: {
-        status: query.status ?? UnitStatus.vacant,
-        ...(query.bedrooms !== undefined ? { bedrooms: query.bedrooms } : {}),
-        ...(query.min_price !== undefined || query.max_price !== undefined
-          ? {
-              rentAmount: {
-                ...(query.min_price !== undefined ? { gte: query.min_price } : {}),
-                ...(query.max_price !== undefined ? { lte: query.max_price } : {}),
-              },
-            }
-          : {}),
-        property: {
-          ...(query.city ? { city: query.city } : {}),
-          ...(query.region ? { region: query.region } : {}),
+    const where = {
+      status: query.status ?? UnitStatus.vacant,
+      ...(query.bedrooms !== undefined ? { bedrooms: query.bedrooms } : {}),
+      ...(query.min_bedrooms !== undefined ? { bedrooms: { gte: query.min_bedrooms } } : {}),
+      ...(query.min_price !== undefined || query.max_price !== undefined
+        ? {
+            rentAmount: {
+              ...(query.min_price !== undefined ? { gte: query.min_price } : {}),
+              ...(query.max_price !== undefined ? { lte: query.max_price } : {}),
+            },
+          }
+        : {}),
+      property: {
+        // Case-insensitive so "douala" from a search box matches "Douala".
+        ...(query.city ? { city: { equals: query.city, mode: 'insensitive' as const } } : {}),
+        ...(query.region ? { region: { equals: query.region, mode: 'insensitive' as const } } : {}),
+        ...(query.property_type ? { propertyType: query.property_type } : {}),
+      },
+    };
+
+    const [units, total] = await Promise.all([
+      this.prisma.unit.findMany({
+        where,
+        include: {
+          property: {
+            select: {
+              name: true,
+              city: true,
+              region: true,
+              ownershipVerifiedAt: true,
+              propertyType: true,
+              facilities: true,
+            },
+          },
+          photos: { orderBy: { sortOrder: 'asc' }, take: 1 },
         },
-      },
-      include: {
-        property: { select: { city: true, ownershipVerifiedAt: true, propertyType: true, facilities: true } },
-        photos: { orderBy: { sortOrder: 'asc' }, take: 1 },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: limit + 1,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-    });
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit + 1,
+        ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      }),
+      this.prisma.unit.count({ where }),
+    ]);
 
     const hasMore = units.length > limit;
     const page = hasMore ? units.slice(0, limit) : units;
@@ -113,33 +168,102 @@ export class UnitsService {
       results: page.map((unit) => ({
         id: unit.id,
         label: unit.label,
+        description: unit.description,
         bedrooms: unit.bedrooms,
         bathrooms: unit.bathrooms,
+        size_sqm: unit.sizeSqm,
         facilities: unit.facilities,
         rent_amount: unit.rentAmount,
         currency: unit.currency,
+        billing_cycle: unit.billingCycle,
         property: {
+          name: unit.property.name,
           city: unit.property.city,
+          region: unit.property.region,
           verified: unit.property.ownershipVerifiedAt !== null,
           property_type: unit.property.propertyType,
           facilities: unit.property.facilities,
         },
-        cover_photo_url: unit.photos[0]?.storageUrl ?? null,
+        cover_photo_url: unit.photos[0] ? this.photoUrl(unit.photos[0].storageUrl) : null,
       })),
+      total,
       next_cursor: hasMore ? page[page.length - 1].id : null,
+    };
+  }
+
+  // Public detail for a listed unit — what a prospective tenant sees before
+  // signing in. Deliberately omits the street address and any landlord
+  // identity (those are for after a visit is agreed), and 404s for anything
+  // that isn't currently vacant so drafts/occupied units aren't enumerable.
+  async getPublicUnit(unitId: string) {
+    const unit = await this.prisma.unit.findUnique({
+      where: { id: unitId },
+      include: {
+        property: {
+          select: {
+            name: true,
+            city: true,
+            region: true,
+            ownershipVerifiedAt: true,
+            propertyType: true,
+            facilities: true,
+          },
+        },
+        photos: { orderBy: { sortOrder: 'asc' } },
+      },
+    });
+    if (!unit || unit.status !== UnitStatus.vacant) {
+      throw new NotFoundException('Unit not found');
+    }
+
+    return {
+      id: unit.id,
+      label: unit.label,
+      description: unit.description,
+      bedrooms: unit.bedrooms,
+      bathrooms: unit.bathrooms,
+      size_sqm: unit.sizeSqm,
+      facilities: unit.facilities,
+      rent_amount: unit.rentAmount,
+      currency: unit.currency,
+      billing_cycle: unit.billingCycle,
+      property: {
+        name: unit.property.name,
+        city: unit.property.city,
+        region: unit.property.region,
+        verified: unit.property.ownershipVerifiedAt !== null,
+        property_type: unit.property.propertyType,
+        facilities: unit.property.facilities,
+      },
+      photos: unit.photos.map((p) => ({ id: p.id, url: this.photoUrl(p.storageUrl), sort_order: p.sortOrder })),
+      created_at: unit.createdAt,
     };
   }
 
   async getLandlordUnits(landlordId: string) {
     const units = await this.prisma.unit.findMany({
       where: { property: { landlordId } },
-      include: { property: { select: { id: true, name: true, city: true } } },
+      include: {
+        property: { select: { id: true, name: true, city: true } },
+        photos: { orderBy: { sortOrder: 'asc' } },
+      },
       orderBy: { createdAt: 'desc' },
     });
 
-    return units.map((unit) => toUnitResponse(unit));
+    return units.map((unit) => ({
+      ...toUnitResponse(unit),
+      cover_photo_url: unit.photos[0] ? this.photoUrl(unit.photos[0].storageUrl) : null,
+      // All photos, in order, so the landlord can manage them (remove, pick a cover).
+      photos: unit.photos.map((p) => ({ id: p.id, url: this.photoUrl(p.storageUrl), sort_order: p.sortOrder })),
+    }));
   }
 
+  // Landlords can edit every aspect of their unit. Only fields that actually
+  // change are applied, and each real edit is written to the append-only change
+  // log in the same transaction — with whether a tenant was living in the unit
+  // at the time, so the platform can tell if details were changed after
+  // someone moved in. (A tenancy's own agreed rent is a snapshot on the
+  // tenancy and is NOT altered by editing the unit's listed rent here.)
   async updateUnit(landlordId: string, unitId: string, dto: UpdateUnitDto) {
     const unit = await this.getOwnedUnit(landlordId, unitId);
 
@@ -154,15 +278,43 @@ export class UnitsService {
       }
     }
 
-    const updated = await this.prisma.unit.update({
-      where: { id: unitId },
-      data: {
-        rentAmount: dto.rent_amount,
-        description: dto.description,
-        status: dto.status,
-      },
-      include: { property: { select: { id: true, name: true, city: true } } },
-    });
+    const blankToNull = (v: string | null | undefined) => (v === '' ? null : v);
+    const { data, changes } = applyEdits([
+      { field: 'label', key: 'label', current: unit.label, next: blankToNull(dto.label) },
+      { field: 'bedrooms', key: 'bedrooms', current: unit.bedrooms, next: dto.bedrooms },
+      { field: 'bathrooms', key: 'bathrooms', current: unit.bathrooms, next: dto.bathrooms },
+      { field: 'facilities', key: 'facilities', current: unit.facilities, next: dto.facilities, unordered: true },
+      { field: 'size_sqm', key: 'sizeSqm', current: unit.sizeSqm, next: dto.size_sqm },
+      { field: 'rent_amount', key: 'rentAmount', current: unit.rentAmount, next: dto.rent_amount },
+      { field: 'currency', key: 'currency', current: unit.currency, next: dto.currency },
+      { field: 'billing_cycle', key: 'billingCycle', current: unit.billingCycle, next: dto.billing_cycle },
+      { field: 'description', key: 'description', current: unit.description, next: blankToNull(dto.description) },
+      { field: 'status', key: 'status', current: unit.status, next: dto.status },
+    ]);
+
+    if (changes.length === 0) {
+      return toUnitResponse(unit);
+    }
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.unit.update({
+        where: { id: unitId },
+        data,
+        include: { property: { select: { id: true, name: true, city: true } } },
+      }),
+      this.listingChanges.buildRecord({
+        entityType: ListingEntityType.unit,
+        propertyId: unit.propertyId,
+        unitId: unit.id,
+        entityLabel: (data.label as string | null | undefined) ?? unit.label,
+        changedBy: landlordId,
+        action: 'updated',
+        changes,
+        note: dto.change_note,
+        occupiedUnitIds: this.inResidence(unit.status) ? [unit.id] : [],
+        propertyVerifiedAtChange: unit.property.ownershipVerifiedAt !== null,
+      }),
+    ]);
 
     if (dto.status && dto.status !== unit.status) {
       this.events.emit(UNIT_STATUS_CHANGED, {
@@ -173,6 +325,73 @@ export class UnitsService {
     }
 
     return toUnitResponse(updated);
+  }
+
+  // Removing a photo is an edit like any other: recorded (with the removed
+  // photo's reference kept in the log), and the remaining photos are
+  // re-sequenced so sort_order stays contiguous. A vacant unit left with no
+  // photos goes back to draft — the same "no photo, not listed" rule as before
+  // its first photo was uploaded.
+  async deletePhoto(landlordId: string, unitId: string, photoId: string) {
+    const unit = await this.getOwnedUnit(landlordId, unitId);
+    const photos = await this.prisma.unitPhoto.findMany({ where: { unitId }, orderBy: { sortOrder: 'asc' } });
+    const target = photos.find((p) => p.id === photoId);
+    if (!target) throw new NotFoundException('Photo not found');
+
+    const remaining = photos.filter((p) => p.id !== photoId);
+    await this.prisma.$transaction([
+      this.prisma.unitPhoto.delete({ where: { id: photoId } }),
+      ...remaining.map((p, i) => this.prisma.unitPhoto.update({ where: { id: p.id }, data: { sortOrder: i } })),
+      this.listingChanges.buildRecord({
+        entityType: ListingEntityType.unit,
+        propertyId: unit.propertyId,
+        unitId: unit.id,
+        entityLabel: unit.label,
+        changedBy: landlordId,
+        action: 'photo_removed',
+        changes: [{ field: 'photo', from: target.storageUrl, to: null }],
+        occupiedUnitIds: this.inResidence(unit.status) ? [unit.id] : [],
+        propertyVerifiedAtChange: unit.property.ownershipVerifiedAt !== null,
+      }),
+    ]);
+
+    let status = unit.status;
+    if (remaining.length === 0 && unit.status === UnitStatus.vacant) {
+      await this.transitionStatus(unit.id, UnitStatus.vacant, UnitStatus.draft);
+      status = UnitStatus.draft;
+    }
+    return { unit_status: status, photos: this.photoList(remaining.map((p, i) => ({ ...p, sortOrder: i }))) };
+  }
+
+  async setCoverPhoto(landlordId: string, unitId: string, photoId: string) {
+    const unit = await this.getOwnedUnit(landlordId, unitId);
+    const photos = await this.prisma.unitPhoto.findMany({ where: { unitId }, orderBy: { sortOrder: 'asc' } });
+    const target = photos.find((p) => p.id === photoId);
+    if (!target) throw new NotFoundException('Photo not found');
+    if (photos[0].id === photoId) {
+      return { unit_status: unit.status, photos: this.photoList(photos) }; // already the cover: nothing to record
+    }
+
+    const reordered = [target, ...photos.filter((p) => p.id !== photoId)];
+    await this.prisma.$transaction([
+      ...reordered.map((p, i) => this.prisma.unitPhoto.update({ where: { id: p.id }, data: { sortOrder: i } })),
+      this.listingChanges.buildRecord({
+        entityType: ListingEntityType.unit,
+        propertyId: unit.propertyId,
+        unitId: unit.id,
+        entityLabel: unit.label,
+        changedBy: landlordId,
+        action: 'cover_photo_changed',
+        changes: [{ field: 'cover_photo', from: photos[0].storageUrl, to: target.storageUrl }],
+        occupiedUnitIds: this.inResidence(unit.status) ? [unit.id] : [],
+        propertyVerifiedAtChange: unit.property.ownershipVerifiedAt !== null,
+      }),
+    ]);
+    return { unit_status: unit.status, photos: this.photoList(reordered.map((p, i) => ({ ...p, sortOrder: i }))) };
+  }
+
+  private photoList(photos: { id: string; storageUrl: string; sortOrder: number }[]) {
+    return photos.map((p) => ({ id: p.id, url: this.photoUrl(p.storageUrl), sort_order: p.sortOrder }));
   }
 
   // Public so the occupancy listener (this module's own reaction to

@@ -3,7 +3,7 @@ import { TenanciesService } from './tenancies.service';
 
 function buildPrismaMock() {
   return {
-    tenancy: { create: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+    tenancy: { create: jest.fn(), findMany: jest.fn(), findUnique: jest.fn(), findUniqueOrThrow: jest.fn(), update: jest.fn() },
     terminationNotice: { create: jest.fn(), findMany: jest.fn() },
   };
 }
@@ -14,7 +14,12 @@ describe('TenanciesService', () => {
   let usersService: { exists: jest.Mock };
   let events: { emit: jest.Mock; emitAsync: jest.Mock };
   let objectStorage: { upload: jest.Mock };
-  let paymentsService: { getCurrentBalance: jest.Mock; getRecentLedgerEntries: jest.Mock };
+  let paymentsService: {
+    getCurrentBalance: jest.Mock;
+    getRecentLedgerEntries: jest.Mock;
+    planPrepaidRent: jest.Mock;
+    recordPrepaidRent: jest.Mock;
+  };
   let contractsService: { getLatestStatusForTenancy: jest.Mock };
   let service: TenanciesService;
 
@@ -24,11 +29,17 @@ describe('TenanciesService', () => {
     usersService = { exists: jest.fn() };
     events = { emit: jest.fn(), emitAsync: jest.fn().mockResolvedValue([]) };
     objectStorage = { upload: jest.fn().mockResolvedValue('local://termination-notices/x.txt') };
-    paymentsService = { getCurrentBalance: jest.fn().mockResolvedValue(0), getRecentLedgerEntries: jest.fn().mockResolvedValue([]) };
+    paymentsService = {
+      getCurrentBalance: jest.fn().mockResolvedValue(0),
+      getRecentLedgerEntries: jest.fn().mockResolvedValue([]),
+      planPrepaidRent: jest.fn(),
+      recordPrepaidRent: jest.fn().mockResolvedValue({ payment_id: 'payment-1' }),
+    };
     contractsService = { getLatestStatusForTenancy: jest.fn().mockResolvedValue(null) };
     service = new TenanciesService(
       prisma as never,
       units as never,
+      { listForTenancy: jest.fn() } as never,
       usersService as never,
       events as never,
       objectStorage,
@@ -51,6 +62,91 @@ describe('TenanciesService', () => {
 
       await expect(service.createTenancy('landlord-1', baseDto)).rejects.toMatchObject({
         response: { code: 'UNIT_NOT_VACANT' },
+      });
+    });
+
+    describe('prepaid_months', () => {
+      const tenancyRow = {
+        id: 'tenancy-1',
+        unitId: 'unit-1',
+        tenantId: 'tenant-1',
+        landlordId: 'landlord-1',
+        startDate: new Date('2026-09-01'),
+        rentAmount: 150000,
+        currency: 'XAF',
+        billingCycle: 'monthly',
+        noticePeriodDays: 90,
+        maxAdvanceMonths: 3,
+        paidThroughDate: null,
+        reminderFirstDaysBefore: 30,
+        reminderSecondDaysBefore: 14,
+        status: 'active',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      const plan = {
+        amount: 450000,
+        periodStart: new Date('2026-09-01'),
+        periodEnd: new Date('2026-11-30'),
+        paidAt: new Date('2026-09-01T12:00:00Z'),
+      };
+
+      beforeEach(() => {
+        units.getUnitOwnership.mockResolvedValue({ id: 'unit-1', landlordId: 'landlord-1', status: 'vacant' });
+        usersService.exists.mockResolvedValue(true);
+        prisma.tenancy.create.mockResolvedValue(tenancyRow);
+      });
+
+      it('records the upfront rent after creating the tenancy and returns the updated paid_through_date', async () => {
+        paymentsService.planPrepaidRent.mockReturnValue(plan);
+        prisma.tenancy.findUniqueOrThrow.mockResolvedValue({ ...tenancyRow, paidThroughDate: new Date('2026-11-30') });
+
+        const result = await service.createTenancy('landlord-1', { ...baseDto, prepaid_months: 3 });
+
+        expect(paymentsService.planPrepaidRent).toHaveBeenCalledWith(
+          expect.objectContaining({ rentAmount: 150000, billingCycle: 'monthly', months: 3 }),
+        );
+        expect(paymentsService.recordPrepaidRent).toHaveBeenCalledWith(
+          { id: 'tenancy-1', tenantId: 'tenant-1', currency: 'XAF' },
+          plan,
+          'landlord-1',
+        );
+        expect(result.paid_through_date).toBe('2026-11-30');
+      });
+
+      it('validates first: an invalid prepaid request creates no tenancy at all', async () => {
+        paymentsService.planPrepaidRent.mockImplementation(() => {
+          throw new Error('PREPAID_MONTHS_INVALID_FOR_BILLING_CYCLE');
+        });
+
+        await expect(service.createTenancy('landlord-1', { ...baseDto, prepaid_months: 2 })).rejects.toThrow(
+          'PREPAID_MONTHS_INVALID_FOR_BILLING_CYCLE',
+        );
+        expect(prisma.tenancy.create).not.toHaveBeenCalled();
+        expect(paymentsService.recordPrepaidRent).not.toHaveBeenCalled();
+      });
+
+      it('passes the date the tenant actually paid through to the plan', async () => {
+        paymentsService.planPrepaidRent.mockReturnValue(plan);
+        prisma.tenancy.findUniqueOrThrow.mockResolvedValue(tenancyRow);
+
+        await service.createTenancy('landlord-1', { ...baseDto, prepaid_months: 3, prepaid_paid_on: '2026-08-30' });
+
+        expect(paymentsService.planPrepaidRent).toHaveBeenCalledWith(expect.objectContaining({ paidOn: '2026-08-30' }));
+      });
+
+      it('rejects prepaid_paid_on without prepaid_months, creating nothing', async () => {
+        await expect(
+          service.createTenancy('landlord-1', { ...baseDto, prepaid_paid_on: '2026-08-30' }),
+        ).rejects.toMatchObject({ response: { code: 'VALIDATION_ERROR' } });
+        expect(prisma.tenancy.create).not.toHaveBeenCalled();
+      });
+
+      it('does not touch Payments when prepaid_months is omitted', async () => {
+        await service.createTenancy('landlord-1', baseDto);
+
+        expect(paymentsService.planPrepaidRent).not.toHaveBeenCalled();
+        expect(paymentsService.recordPrepaidRent).not.toHaveBeenCalled();
       });
     });
 

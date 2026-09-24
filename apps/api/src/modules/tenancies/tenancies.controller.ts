@@ -58,6 +58,12 @@ export class TenanciesController {
     return this.tenanciesService.createTerminationNotice(user.userId, tenancyId, dto);
   }
 
+  @Get('tenancies/:id/listing-changes')
+  @ApiOperation({ summary: 'Edits the landlord made to this home (unit and property) since the tenancy was created.' })
+  listListingChanges(@CurrentUser() user: AuthenticatedUser, @Param('id', ParseUUIDPipe) tenancyId: string) {
+    return this.tenanciesService.listListingChanges(user.userId, tenancyId);
+  }
+
   @Get('tenancies/:id/termination-notices')
   @ApiOperation({ summary: 'History of termination notices on this tenancy.' })
   listTerminationNotices(@CurrentUser() user: AuthenticatedUser, @Param('id', ParseUUIDPipe) tenancyId: string) {

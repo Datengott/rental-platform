@@ -2,11 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import NavBar from "@/components/NavBar";
+import ChangeList from "@/components/ChangeList";
 import FacilityPicker from "@/components/FacilityPicker";
+import { IconImage } from "@/components/Icons";
+import PaymentHistory from "@/components/PaymentHistory";
+import PropertyEditor from "@/components/PropertyEditor";
+import UnitEditor from "@/components/UnitEditor";
 import { api, ApiError, loadSession } from "@/lib/api";
-import { Complaint, Property, Tenancy, Unit, UnitInterest, VisitRequest } from "@/lib/types";
+import { Complaint, ListingChange, Property, Tenancy, Unit, UnitInterest, VisitRequest } from "@/lib/types";
 import { PROPERTY_FACILITIES, PROPERTY_TYPE_LABELS, UNIT_FACILITIES, facilityLabel } from "@/lib/facilities";
+import { formatMoney } from "@/lib/format";
+import { addDays, describeCoveredMonths, dueStatus, endOfNthMonth, formatDate, todayIso } from "@/lib/dates";
 
 function ErrorBox({ error }: { error: string | null }) {
   if (!error) return null;
@@ -24,6 +30,20 @@ export default function LandlordPage() {
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [interests, setInterests] = useState<UnitInterest[]>([]);
   const [creatingTenancyFor, setCreatingTenancyFor] = useState<string | null>(null);
+  const [tab, setTab] = useState<"listings" | "tenancies" | "inbox" | "history">("listings");
+  const [editingProperty, setEditingProperty] = useState<string | null>(null);
+  const [editingUnit, setEditingUnit] = useState<string | null>(null);
+  const [changes, setChanges] = useState<ListingChange[]>([]);
+  const [changesOccupiedOnly, setChangesOccupiedOnly] = useState(false);
+  const [interestPrepaid, setInterestPrepaid] = useState<Record<string, string>>({});
+  const [prepaidPreview, setPrepaidPreview] = useState<string | null>(null);
+  const [startHint, setStartHint] = useState<string | null>(null);
+  // Per-interest start date for the one-click path (defaults to today).
+  const [interestStart, setInterestStart] = useState<Record<string, string>>({});
+  // Per-interest "date the tenant actually paid" for upfront rent (defaults to today).
+  const [interestPaidOn, setInterestPaidOn] = useState<Record<string, string>>({});
+  // Lazy initialiser: today's date is read once, not on every render.
+  const [today] = useState(todayIso);
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -45,13 +65,17 @@ export default function LandlordPage() {
 
   async function refreshAll() {
     try {
-      const [u, t, v, c, i] = await Promise.all([
+      const [p, u, t, v, c, i, h] = await Promise.all([
+        api<Property[]>("/landlords/me/properties"),
         api<Unit[]>("/landlords/me/units"),
         api<Tenancy[]>("/landlords/me/tenancies"),
         api<{ results: VisitRequest[] }>("/landlords/me/visit-requests"),
         api<Complaint[]>("/landlords/me/complaints"),
         api<{ results: UnitInterest[] }>("/landlords/me/interests"),
+        api<{ results: ListingChange[] }>("/landlords/me/listing-changes?limit=100"),
       ]);
+      setProperties(p);
+      setChanges(h.results ?? []);
       setUnits(u);
       setTenancies(t);
       setVisitRequests(v.results ?? []);
@@ -89,10 +113,10 @@ export default function LandlordPage() {
           facilities: propertyFacilities.length > 0 ? propertyFacilities : undefined,
         },
       });
-      setProperties((prev) => [prop, ...prev]);
       formEl.reset();
       setPropertyFacilities([]);
       flash(`Property "${prop.name ?? prop.address_line}" created.`);
+      await refreshAll();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not create property.");
     }
@@ -150,6 +174,30 @@ export default function LandlordPage() {
   }
 
   // --- Tenancies ---
+  function updateFormHints(formEl: HTMLFormElement) {
+    const form = new FormData(formEl);
+    const months = Number(form.get("prepaid_months"));
+    const start = String(form.get("start_date") ?? "");
+    const rent = Number(form.get("rent_amount"));
+
+    // Billing starts on the start date — which need not be today.
+    if (!start) setStartHint(null);
+    else if (start > today) setStartHint(`Future start: no rent is due until ${formatDate(start)}, when billing begins.`);
+    else if (start < today) setStartHint(`Backdated: billing counts from ${formatDate(start)}.`);
+    else setStartHint("Billing starts today. Choose a later date if the tenant moves in later.");
+
+    if (!months || months < 1 || !start || !rent) {
+      setPrepaidPreview(null);
+      return;
+    }
+    const end = endOfNthMonth(start, months);
+    const covered = describeCoveredMonths(start, end);
+    const paidOn = String(form.get("prepaid_paid_on") || today);
+    setPrepaidPreview(
+      `${formatMoney(rent * months)} XAF will be recorded as paid on ${formatDate(paidOn)} — covers ${covered.label} (${covered.count} month${covered.count === 1 ? "" : "s"}, ${formatDate(start)} to ${formatDate(end)}). Next payment due ${formatDate(addDays(end, 1))}.`,
+    );
+  }
+
   async function createTenancy(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const formEl = e.currentTarget;
@@ -163,10 +211,18 @@ export default function LandlordPage() {
           start_date: form.get("start_date"),
           rent_amount: Number(form.get("rent_amount")),
           max_advance_months: form.get("max_advance_months") ? Number(form.get("max_advance_months")) : undefined,
+          prepaid_months: form.get("prepaid_months") ? Number(form.get("prepaid_months")) : undefined,
+          prepaid_paid_on: form.get("prepaid_months") && form.get("prepaid_paid_on") ? form.get("prepaid_paid_on") : undefined,
         },
       });
       formEl.reset();
-      flash("Tenancy created.");
+      setPrepaidPreview(null);
+      setStartHint(null);
+      const startedOn = String(form.get("start_date"));
+      flash(
+        `Tenancy created — billing ${startedOn > today ? "starts" : "started"} ${formatDate(startedOn)}` +
+          (form.get("prepaid_months") ? `, with ${form.get("prepaid_months")} month(s) recorded as paid upfront.` : "."),
+      );
       await refreshAll();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not create tenancy.");
@@ -175,9 +231,9 @@ export default function LandlordPage() {
 
   // One-click alternative to the paste-the-tenant-id form above, for a
   // tenant who already expressed interest in a unit — defaults rent to the
-  // unit's own listed rent and start_date to today, since the whole point
-  // of "click of a button" is skipping a second form; a landlord who wants
-  // a different start date/rent still has the form for that.
+  // unit's own listed rent and start_date to today (changeable right on the
+  // row), since the whole point of "click of a button" is skipping a second
+  // form; a landlord who wants a different rent still has the form for that.
   async function createTenancyFromInterest(interest: UnitInterest) {
     const unit = units.find((u) => u.id === interest.unit_id);
     if (!unit) {
@@ -191,11 +247,16 @@ export default function LandlordPage() {
         body: {
           unit_id: interest.unit_id,
           tenant_id: interest.tenant_id,
-          start_date: new Date().toISOString().slice(0, 10),
+          start_date: interestStart[interest.id] ?? today,
           rent_amount: Number(unit.rent_amount),
+          prepaid_months: interestPrepaid[interest.id] ? Number(interestPrepaid[interest.id]) : undefined,
+          prepaid_paid_on: interestPrepaid[interest.id] ? (interestPaidOn[interest.id] ?? today) : undefined,
         },
       });
-      flash(`Tenancy created for ${interest.tenant_name ?? interest.tenant_phone_number}.`);
+      flash(
+        `Tenancy created for ${interest.tenant_name ?? interest.tenant_phone_number} — billing ${(interestStart[interest.id] ?? today) > today ? "starts" : "started"} ${formatDate(interestStart[interest.id] ?? today)}` +
+          (interestPrepaid[interest.id] ? `, with ${interestPrepaid[interest.id]} month(s) recorded as paid upfront.` : "."),
+      );
       await refreshAll();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not create tenancy.");
@@ -260,9 +321,11 @@ export default function LandlordPage() {
 
   return (
     <>
-      <NavBar />
       <div className="page">
         <h1>Landlord tools</h1>
+        <p className="muted" style={{ fontSize: 14.5, margin: 0 }}>
+          Your properties, tenants and requests in one place.
+        </p>
         <ErrorBox error={error} />
         {notice && <div className="success-box">{notice}</div>}
 
@@ -289,6 +352,24 @@ export default function LandlordPage() {
           </div>
         </div>
 
+
+        <div className="tabs" role="tablist">
+          <button role="tab" aria-selected={tab === "listings"} className={`tab ${tab === "listings" ? "active" : ""}`} onClick={() => setTab("listings")}>
+            Properties &amp; units
+          </button>
+          <button role="tab" aria-selected={tab === "tenancies"} className={`tab ${tab === "tenancies" ? "active" : ""}`} onClick={() => setTab("tenancies")}>
+            Tenants &amp; tenancies {interests.filter((i) => i.status === "pending").length > 0 && <span className="count">{interests.filter((i) => i.status === "pending").length}</span>}
+          </button>
+          <button role="tab" aria-selected={tab === "history"} className={`tab ${tab === "history" ? "active" : ""}`} onClick={() => setTab("history")}>
+            Change history {changes.filter((c) => c.while_occupied).length > 0 && <span className="count">{changes.filter((c) => c.while_occupied).length}</span>}
+          </button>
+          <button role="tab" aria-selected={tab === "inbox"} className={`tab ${tab === "inbox" ? "active" : ""}`} onClick={() => setTab("inbox")}>
+            Requests {visitRequests.filter((v) => v.status === "pending").length + complaints.filter((c) => c.status !== "closed").length > 0 && <span className="count">{visitRequests.filter((v) => v.status === "pending").length + complaints.filter((c) => c.status !== "closed").length}</span>}
+          </button>
+        </div>
+
+        {tab === "listings" && (
+          <>
         <div className="grid-2">
           <div className="card">
             <h2>Add a property</h2>
@@ -330,18 +411,37 @@ export default function LandlordPage() {
             {properties.length > 0 && (
               <ul className="list" style={{ marginTop: 12 }}>
                 {properties.map((p) => (
-                  <li key={p.id} className="list-item">
-                    <span>
-                      {p.name ?? p.address_line} — {p.city}
-                      {p.property_type && <span className="badge active" style={{ marginLeft: 6 }}>{PROPERTY_TYPE_LABELS[p.property_type]}</span>}
-                      {p.facilities.length > 0 && (
-                        <div>
-                          {p.facilities.map((f) => (
-                            <span key={f} className="tag">{facilityLabel(f)}</span>
-                          ))}
-                        </div>
-                      )}
-                    </span>
+                  <li key={p.id} className="list-item" style={{ display: "block" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                      <span>
+                        <strong>{p.name ?? p.address_line}</strong> — {p.city}
+                        {p.property_type && <span className="badge active" style={{ marginLeft: 6 }}>{PROPERTY_TYPE_LABELS[p.property_type]}</span>}
+                        {(p.occupied_unit_count ?? 0) > 0 && (
+                          <span className="badge occupied" style={{ marginLeft: 6 }}>{p.occupied_unit_count} occupied</span>
+                        )}
+                        {p.facilities.length > 0 && (
+                          <div>
+                            {p.facilities.map((f) => (
+                              <span key={f} className="tag">{facilityLabel(f)}</span>
+                            ))}
+                          </div>
+                        )}
+                      </span>
+                      <button type="button" className="secondary" onClick={() => setEditingProperty(editingProperty === p.id ? null : p.id)}>
+                        {editingProperty === p.id ? "Close" : "Edit"}
+                      </button>
+                    </div>
+                    {editingProperty === p.id && (
+                      <PropertyEditor
+                        property={p}
+                        onCancel={() => setEditingProperty(null)}
+                        onSaved={(message) => {
+                          setEditingProperty(null);
+                          flash(message);
+                          void refreshAll();
+                        }}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>
@@ -412,6 +512,15 @@ export default function LandlordPage() {
             <ul className="list">
               {units.map((u) => (
                 <li key={u.id} className="list-item">
+                  <span className="item-main">
+                    {u.cover_photo_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img className="thumb" src={u.cover_photo_url} alt="" loading="lazy" />
+                    ) : (
+                      <span className="thumb thumb-empty">
+                        <IconImage size={22} />
+                      </span>
+                    )}
                   <span>
                     <strong>{u.label ?? "Unnamed unit"}</strong> — {u.property.name ?? u.property.city} —{" "}
                     {u.rent_amount} {u.currency}
@@ -429,8 +538,12 @@ export default function LandlordPage() {
                     <br />
                     <span className="muted">id: {u.id}</span>
                   </span>
+                  </span>
                   <span className="row" style={{ alignItems: "center" }}>
                     <span className={`badge ${u.status}`}>{u.status}</span>
+                    <button type="button" className="secondary" onClick={() => setEditingUnit(editingUnit === u.id ? null : u.id)}>
+                      {editingUnit === u.id ? "Close" : "Edit"}
+                    </button>
                     <label className="secondary" style={{ cursor: "pointer" }}>
                       <input
                         type="file"
@@ -446,17 +559,61 @@ export default function LandlordPage() {
                       </span>
                     </label>
                   </span>
+                  {editingUnit === u.id && (
+                    <div style={{ flexBasis: "100%" }}>
+                      <UnitEditor
+                        unit={u}
+                        onCancel={() => setEditingUnit(null)}
+                        onSaved={(message) => {
+                          setEditingUnit(null);
+                          flash(message);
+                          void refreshAll();
+                        }}
+                        onPhotosChanged={(message) => {
+                          flash(message);
+                          void refreshAll();
+                        }}
+                      />
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
           )}
         </div>
 
+          </>
+        )}
+
+        {tab === "history" && (
+          <div className="card">
+            <h2>Change history</h2>
+            <p className="muted">
+              Every edit to your properties and units is recorded and can&apos;t be altered or deleted. Edits made
+              while a tenant was living in the unit are highlighted, and tenants can see them too.
+            </p>
+            <label className="chip" style={{ display: "inline-flex", marginBottom: 4 }}>
+              <input
+                type="checkbox"
+                checked={changesOccupiedOnly}
+                onChange={(e) => setChangesOccupiedOnly(e.target.checked)}
+              />
+              Only changes made while a tenant lived there
+            </label>
+            <ChangeList
+              changes={changesOccupiedOnly ? changes.filter((c) => c.while_occupied) : changes}
+              emptyText={changesOccupiedOnly ? "No edits were made while a tenant was living there." : "You haven't edited anything yet."}
+            />
+          </div>
+        )}
+
+        {tab === "tenancies" && (
+          <>
         <div className="card">
           <h2>Interested tenants</h2>
           <p className="muted">
             Tenants who expressed interest in one of your units, browsing the public listings — create a tenancy
-            for any of them with one click, as an alternative to the paste-the-tenant-id form below.
+            for any of them with one click (starting today, or pick a start date), as an alternative to the paste-the-tenant-id form below.
           </p>
           {interests.filter((i) => i.status === "pending").length === 0 ? (
             <p className="muted">No pending interest yet.</p>
@@ -470,9 +627,45 @@ export default function LandlordPage() {
                       <strong>{i.tenant_name ?? i.tenant_phone_number}</strong> ({i.tenant_phone_number}) — interested
                       in <strong>{i.unit_label ?? i.unit_id.slice(0, 8)}</strong>
                     </span>
-                    <button onClick={() => createTenancyFromInterest(i)} disabled={creatingTenancyFor === i.id}>
-                      {creatingTenancyFor === i.id ? "Creating…" : "Create tenancy"}
-                    </button>
+                    <span className="row" style={{ alignItems: "flex-end" }}>
+                      <div className="field" style={{ margin: 0, width: 150 }}>
+                        <label htmlFor={`start-${i.id}`}>Start date</label>
+                        <input
+                          id={`start-${i.id}`}
+                          type="date"
+                          value={interestStart[i.id] ?? today}
+                          onChange={(e) => setInterestStart((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                        />
+                      </div>
+                      <div className="field" style={{ margin: 0, width: 130 }}>
+                        <label htmlFor={`prepaid-${i.id}`}>Months paid upfront</label>
+                        <input
+                          id={`prepaid-${i.id}`}
+                          type="number"
+                          min={1}
+                          max={24}
+                          step={1}
+                          placeholder="optional"
+                          value={interestPrepaid[i.id] ?? ""}
+                          onChange={(e) => setInterestPrepaid((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                        />
+                      </div>
+                      {interestPrepaid[i.id] && (
+                        <div className="field" style={{ margin: 0, width: 150 }}>
+                          <label htmlFor={`paidon-${i.id}`}>Date paid</label>
+                          <input
+                            id={`paidon-${i.id}`}
+                            type="date"
+                            max={today}
+                            value={interestPaidOn[i.id] ?? today}
+                            onChange={(e) => setInterestPaidOn((prev) => ({ ...prev, [i.id]: e.target.value }))}
+                          />
+                        </div>
+                      )}
+                      <button onClick={() => createTenancyFromInterest(i)} disabled={creatingTenancyFor === i.id}>
+                        {creatingTenancyFor === i.id ? "Creating…" : "Create tenancy"}
+                      </button>
+                    </span>
                   </li>
                 ))}
             </ul>
@@ -481,7 +674,7 @@ export default function LandlordPage() {
 
         <div className="card">
           <h2>Create a tenancy</h2>
-          <form onSubmit={createTenancy}>
+          <form onSubmit={createTenancy} onChange={(e) => updateFormHints(e.currentTarget)}>
             <div className="row">
               <div className="field">
                 <label>Unit</label>
@@ -503,8 +696,8 @@ export default function LandlordPage() {
             </div>
             <div className="row">
               <div className="field">
-                <label>Start date</label>
-                <input name="start_date" type="date" required />
+                <label>Start date — billing starts here</label>
+                <input name="start_date" type="date" required defaultValue={today} />
               </div>
               <div className="field">
                 <label>Rent (XAF/month)</label>
@@ -515,12 +708,26 @@ export default function LandlordPage() {
                 <input name="max_advance_months" type="number" min={1} placeholder="3" />
               </div>
             </div>
+            <div className="row">
+              <div className="field" style={{ maxWidth: 360 }}>
+                <label>Months already paid upfront (optional)</label>
+                <input name="prepaid_months" type="number" min={1} max={24} step={1} placeholder="e.g. 3 if paid in cash" />
+              </div>
+              <div className="field" style={{ maxWidth: 200 }}>
+                <label>Date paid</label>
+                <input name="prepaid_paid_on" type="date" max={today} defaultValue={today} />
+              </div>
+            </div>
+            {startHint && <p className="muted" style={{ margin: "0 0 10px" }}>{startHint}</p>}
+            {prepaidPreview && <div className="success-box">{prepaidPreview}</div>}
             <button type="submit">Create tenancy</button>
           </form>
           <p className="muted">
             The tenant finds their own user ID on their Tenant dashboard — there is no search-by-phone endpoint in this
             demo, so it&apos;s a simple copy/paste hand-off. Max advance months defaults to 3 if left blank, and caps
-            how far ahead the tenant is allowed to pay in one go.
+            how far ahead the tenant is allowed to pay in one go. If the tenant already handed you rent (say, cash for
+            the first few months), enter the number of months — it&apos;s recorded as a confirmed payment, so it shows
+            in their ledger, advances their &quot;paid through&quot; date, and they get a receipt.
           </p>
         </div>
 
@@ -536,8 +743,24 @@ export default function LandlordPage() {
                     Unit <span className="muted">{t.unit_id.slice(0, 8)}</span> — {t.rent_amount} {t.currency}/
                     {t.billing_cycle}
                     <br />
+                    <span className="due-line">
+                      <span>
+                        Billing {t.start_date > today ? "starts" : "started"} <strong>{formatDate(t.start_date)}</strong>
+                      </span>
+                      {t.next_payment_due_date && (
+                        <span>
+                          Next payment due <strong>{formatDate(t.next_payment_due_date)}</strong>
+                          {dueStatus(t.next_payment_due_date, today) === "overdue" && (
+                            <span className="badge failed" style={{ marginLeft: 6 }}>overdue</span>
+                          )}
+                          {dueStatus(t.next_payment_due_date, today) === "today" && (
+                            <span className="badge pending" style={{ marginLeft: 6 }}>due today</span>
+                          )}
+                        </span>
+                      )}
+                    </span>
                     Balance: <strong>{t.current_balance ?? "—"}</strong> · Paid through:{" "}
-                    <strong>{t.paid_through_date ?? "—"}</strong>
+                    <strong>{t.paid_through_date ? formatDate(t.paid_through_date) : "—"}</strong>
                     {t.months_paid_ahead > 0 && (
                       <span className="badge active" style={{ marginLeft: 6 }}>
                         {t.months_paid_ahead} month{t.months_paid_ahead > 1 ? "s" : ""} paid ahead
@@ -551,6 +774,14 @@ export default function LandlordPage() {
                       Max advance: {t.max_advance_months} month(s) · Tenancy id (give this to the tenant so they can
                       look it up): <code>{t.id}</code>
                     </span>
+                    {t.recent_ledger_entries && t.recent_ledger_entries.length > 0 && (
+                      <PaymentHistory
+                        entries={t.recent_ledger_entries}
+                        currency={t.currency}
+                        nextPaymentDue={t.next_payment_due_date}
+                        today={today}
+                      />
+                    )}
                   </span>
                   <span className="row">
                     <button className="secondary" onClick={() => generateContract(t.id)}>
@@ -566,6 +797,11 @@ export default function LandlordPage() {
           )}
         </div>
 
+          </>
+        )}
+
+        {tab === "inbox" && (
+          <>
         <div className="card">
           <h2>Visit request inbox</h2>
           {visitRequests.length === 0 ? (
@@ -626,6 +862,8 @@ export default function LandlordPage() {
             </ul>
           )}
         </div>
+          </>
+        )}
       </div>
     </>
   );

@@ -193,6 +193,48 @@ model UnitPhoto {
   @@map("unit_photos")
 }
 
+// Audit trail of landlord edits to properties and units (added 2026-09-20,
+// demo feedback: landlords can now edit everything about their listings, and
+// the platform must be able to tell when details were changed — especially
+// after a tenant already moved in). APPEND-ONLY, same spirit as
+// ledger_entries: application code only ever INSERTs into this table, never
+// UPDATEs or DELETEs, so it stays trustworthy as evidence.
+enum ListingEntityType {
+  property
+  unit
+}
+
+model ListingChange {
+  id           String            @id @default(uuid())
+  entityType   ListingEntityType @map("entity_type")
+  // Always set — a unit change records its property too, so "everything that
+  // happened at this property" is one query.
+  propertyId   String            @map("property_id")
+  unitId       String?           @map("unit_id")
+  // Name/label at the moment of the change, since either can be edited later.
+  entityLabel  String?           @map("entity_label")
+  changedBy    String            @map("changed_by") // references users.id — NOT a Prisma relation.
+  // 'updated' | 'photo_added' | 'photo_removed' | 'cover_photo_changed'
+  action       String
+  // [{ field, from, to }] — only the fields that actually changed.
+  changes      Json
+  note         String?
+  // Units, among those this change touched, that had a tenant in residence
+  // (status occupied or notice_given) when it was made. Non-empty means "the
+  // landlord changed this while someone was living there".
+  occupiedUnitIds          String[]  @default([]) @map("occupied_unit_ids")
+  // Whether the property carried the ownership-verified badge at the time — a
+  // change to a verified property's address is what an admin re-checks.
+  propertyVerifiedAtChange Boolean   @map("property_verified_at_change")
+  createdAt    DateTime          @default(now()) @map("created_at")
+
+  @@index([propertyId, createdAt])
+  @@index([unitId, createdAt])
+  @@index([changedBy, createdAt])
+  @@index([createdAt])
+  @@map("listing_changes")
+}
+
 // ============================================================
 // B.3 — Visit Requests Module
 // ============================================================
@@ -337,6 +379,12 @@ model TerminationNotice {
 enum PaymentProvider {
   campay
   monetbil
+  // Rent the landlord records as already received outside the platform (e.g.
+  // cash paid upfront when the tenancy is created) — added 2026-09-20. Never
+  // accepted from the client-facing API (CreatePaymentDto still only allows
+  // 'campay' | 'monetbil'); only PaymentsService.recordPrepaidRent writes it,
+  // so a tenant can't mark their own rent as paid.
+  offline
 }
 
 enum PaymentStatus {

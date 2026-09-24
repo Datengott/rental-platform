@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsOptional, IsPositive, IsUUID, Matches, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsPositive, IsUUID, Matches, Max, Min } from 'class-validator';
 
 export const BILLING_CYCLES = ['monthly', 'quarterly', 'biannual'] as const;
 
@@ -40,6 +40,27 @@ export class CreateTenancyDto {
   @IsInt()
   @Min(1)
   max_advance_months?: number;
+
+  // Months of rent the tenant already paid the landlord outside the
+  // platform (e.g. cash upfront) — recorded as a confirmed offline payment
+  // covering start_date through the end of the Nth month, so it shows up in
+  // the ledger, the receipt, paid_through_date and the tenant's dashboard.
+  // Added 2026-09-20 (demo feedback). Bounded to two years as a sanity
+  // check on typos; intentionally NOT limited by max_advance_months.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(24)
+  prepaid_months?: number;
+
+  // The day the tenant actually handed over that rent (e.g. the move-in day),
+  // if that isn't the day the landlord is recording it. Defaults to today.
+  // Only meaningful together with prepaid_months. Becomes the payment's
+  // confirmation date — what "Paid on …" shows — while the ledger entry keeps
+  // its true creation time as the audit record of when it was entered.
+  @IsOptional()
+  @Matches(DATE_ONLY, { message: 'prepaid_paid_on must be a date in YYYY-MM-DD format' })
+  prepaid_paid_on?: string;
 
   @IsOptional()
   @IsInt()

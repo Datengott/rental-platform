@@ -175,6 +175,20 @@ export class VisitsService {
     };
   }
 
+  // The tenant's own view of what they've expressed interest in — lets the
+  // public listing pages show "Interested ✓" after a reload instead of only
+  // for the current page session. Unpaginated on purpose: a person's own
+  // list of interests is small, and the listing UI needs all of them to
+  // mark cards, not a page of them.
+  async listInterestsForTenant(tenantId: string) {
+    const interests = await this.prisma.unitInterest.findMany({
+      where: { tenantId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 200,
+    });
+    return { results: interests.map((i) => this.toInterestResponse(i)) };
+  }
+
   // tenancy.created -> mark any matching interest 'converted', regardless
   // of whether the tenancy was actually created from the landlord's
   // "Create tenancy" button on the interest list or via the plain

@@ -319,6 +319,31 @@ describe('Visits module (e2e)', () => {
     });
   });
 
+  it("lets a tenant list their own interests, and nobody else's", async () => {
+    const landlord = await signUp(app, fakeSms, randomPhoneNumber());
+    const unitId = await createListedUnit(landlord.access_token);
+    const tenant = await signUp(app, fakeSms, randomPhoneNumber());
+    const other = await signUp(app, fakeSms, randomPhoneNumber());
+
+    await request(app.getHttpServer())
+      .post(`/v1/units/${unitId}/interest`)
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(201);
+
+    const mine = await request(app.getHttpServer())
+      .get('/v1/tenants/me/interests')
+      .set('Authorization', `Bearer ${tenant.access_token}`)
+      .expect(200);
+    expect(mine.body.results).toHaveLength(1);
+    expect(mine.body.results[0]).toMatchObject({ unit_id: unitId, status: 'pending' });
+
+    const theirs = await request(app.getHttpServer())
+      .get('/v1/tenants/me/interests')
+      .set('Authorization', `Bearer ${other.access_token}`)
+      .expect(200);
+    expect(theirs.body.results).toEqual([]);
+  });
+
   it("marks a tenant's interest as converted once the landlord creates a tenancy for them on that unit", async () => {
     const landlord = await signUp(app, fakeSms, randomPhoneNumber());
     const unitId = await createListedUnit(landlord.access_token);

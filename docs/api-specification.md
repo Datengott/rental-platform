@@ -125,22 +125,61 @@ An optional `quantity` (1-100, added 2026-09-18) bulk-creates that many **indepe
 `multipart/form-data`: `file`, `geo_latitude`, `geo_longitude`, `captured_at`. Returns photo object; first successful upload transitions unit `draft → vacant`.
 
 ### `GET /units`
-Public search. Query params: `city`, `region`, `min_price`, `max_price`, `bedrooms`, `status` (defaults to `vacant`), `cursor`, `limit`.
+Public search (no authentication). Query params: `city`, `region` (both case-insensitive exact match), `property_type`, `min_price`, `max_price`, `bedrooms` (exact), `min_bedrooms` ("N or more"), `status` (defaults to `vacant`), `cursor`, `limit`. `property_type`, `min_bedrooms` and the fields below marked *(added 2026-09-20)* exist because the public landing page is a real listings browser, not just a search endpoint.
 ```json
 {
   "results": [
-    { "id": "uuid", "label": "Unit 4B", "bedrooms": 2, "bathrooms": 1, "facilities": ["ac", "wifi"], "rent_amount": 150000, "currency": "XAF",
-      "property": { "city": "Douala", "verified": true, "property_type": "residential", "facilities": ["gated"] }, "cover_photo_url": "..." }
+    { "id": "uuid", "label": "Unit 4B", "description": "...", "bedrooms": 2, "bathrooms": 1, "size_sqm": 78, "facilities": ["ac", "wifi"],
+      "rent_amount": 150000, "currency": "XAF", "billing_cycle": "monthly",
+      "property": { "name": "Résidence Bonapriso", "city": "Douala", "region": "Littoral", "verified": true, "property_type": "residential", "facilities": ["gated"] },
+      "cover_photo_url": "http://localhost:3000/media/unit-photos/<file>.jpg" }
   ],
+  "total": 14,
   "next_cursor": null
 }
 ```
+`total` is the count of *all* matches for the filters (not just this page). `cover_photo_url` is a browser-loadable URL (see "Media" below), not the internal storage reference.
+
+### `GET /units/{id}` *(public, added 2026-09-20)*
+Public detail for one **vacant** unit — what a prospective tenant sees before signing in. Same fields as a search result plus `photos: [{ "id", "url", "sort_order" }]` (all photos, in order) and `created_at`. Deliberately omits the street address and any landlord identity (shared after a visit is confirmed), and returns `404` for a unit that is a draft, reserved, occupied, or doesn't exist, so unlisted units can't be enumerated.
+
+### Media *(added 2026-09-20)*
+Listing photos are served as static files at `/media/unit-photos/<file>` (outside the `/v1` prefix), from the dev-only local-disk storage. **Only** that folder is served — KYC documents and complaint media live in sibling folders and are never exposed. The absolute base URL comes from `API_PUBLIC_URL`; a real R2 backend would store https URLs directly and they pass through unchanged.
 
 ### `GET /landlords/me/units`
 Landlord's own inventory (all statuses) — feeds the occupancy dashboard's unit list.
 
-### `PATCH /units/{id}`
-Update mutable fields (`rent_amount`, `description`, `status` where the transition is valid).
+### `GET /landlords/me/properties` *(landlord, added 2026-09-20)*
+Landlord's own properties, newest first — each is the property object plus `unit_count` and `occupied_unit_count` (units with a tenant living in them: status `occupied` or `notice_given`). `GET /landlords/me/units` now also returns `photos: [{ "id", "url", "sort_order" }]`, `size_sqm`, `billing_cycle` and `description` per unit, so an editor has everything it needs.
+
+### `PATCH /properties/{id}` *(landlord, added 2026-09-20)*
+Edit any of `name`, `property_type`, `facilities`, `address_line`, `city`, `region`, `latitude`, `longitude`, plus an optional `change_note` (≤300 chars, the reason). Ownership-verification fields are **not** landlord-editable (an admin action). `404` for a property that isn't yours.
+
+**PATCH semantics** (same for units below): a field that is left out is untouched; `null` clears a field that may be empty (`name`, `property_type`, `region`, `latitude`, `longitude`; for units `label`, `bedrooms`, `bathrooms`, `size_sqm`, `description`); `null` is rejected with `400` for fields a record can't be without (`address_line`, `city`; `rent_amount`, `currency`, `billing_cycle`). A value equal to what is already stored is ignored, and an edit that changes nothing writes **no** change record.
+
+### `PATCH /units/{id}` *(landlord)*
+Edit any of `label`, `bedrooms`, `bathrooms`, `facilities`, `size_sqm`, `rent_amount`, `currency`, `billing_cycle`, `description`, `status` (only the manual transitions `vacant ⇄ reserved`; `occupied`/`notice_given` are driven by Tenancies), plus an optional `change_note`. **Editing `rent_amount` changes the *listed* rent only** — an existing tenancy keeps the `rent_amount` agreed when it was created.
+
+### `DELETE /units/{id}/photos/{photoId}` and `POST /units/{id}/photos/{photoId}/cover` *(landlord, added 2026-09-20)*
+Remove a photo (remaining photos are re-sequenced; the cover moves to the next one), or make a photo the cover (`sort_order` 0). Removing the last photo of a `vacant` unit returns it to `draft`, i.e. off the public listings. `DELETE` returns `{ "unit_status", "photos": [...] }`. The underlying file is kept in storage — the change record still references it as evidence of what the listing used to show.
+
+### Listing change log *(added 2026-09-20)*
+Every landlord edit to a property or unit is recorded in the **append-only** `listing_changes` table (never updated or deleted — offsetting edits are new rows, same principle as the ledger) in the *same transaction* as the edit, so an edit can't happen without its record. Recorded: `PATCH /properties/{id}`, `PATCH /units/{id}`, photo removal, cover change, and photo **additions while a tenant is living in the unit** (the first photos of a new listing are setup, not edits, so they aren't logged). One record:
+```json
+{ "id": "uuid", "entity_type": "unit", "property_id": "uuid", "unit_id": "uuid", "entity_label": "Studio A",
+  "action": "updated",                       // updated | photo_added | photo_removed | cover_photo_changed
+  "changes": [ { "field": "rent_amount", "from": "150000", "to": "175000" } ],
+  "note": "Market adjustment",               // the change_note, if given
+  "while_occupied": true,                    // a tenant was living in an affected unit at that moment
+  "occupied_unit_ids": ["uuid"],
+  "property_verified_at_change": false,      // the property was ownership-verified when it was edited
+  "changed_by": "uuid", "created_at": "2026-09-20T10:00:00Z" }
+```
+For a property edit, `while_occupied` is true when *any* of its units had a tenant. "Living there" means unit status `occupied` or `notice_given`. Photo values in `changes` are browser-loadable URLs. Editing an ownership-verified property does not clear its verification (that's an admin decision) — the record just carries `property_verified_at_change: true` so a reviewer can see it.
+
+- `GET /landlords/me/listing-changes?property_id=&unit_id=&while_occupied=&cursor=&limit=` *(landlord)* — edits to your own properties/units, newest first: `{ "results": [...], "next_cursor" }`.
+- `GET /tenancies/{id}/listing-changes` *(landlord or tenant of that tenancy)* — edits to that tenancy's unit and its property **since the tenancy was created**, so a tenant sees what changed after moving in. Omits `changed_by`.
+- `GET /admin/listing-changes?property_id=&unit_id=&while_occupied=&cursor=&limit=` *(admin)* — every landlord's edits; each record also carries `changed_by_profile: { "name", "phone_number" }`. `403` for non-admins.
 
 ---
 
@@ -173,6 +212,9 @@ row rather than erroring or creating a duplicate (a tenant re-clicking the butto
 frontend re-rendering, is harmless). Notifies the landlord the same way `visit_request.created`
 does (waterfall: push → whatsapp → sms).
 
+### `GET /tenants/me/interests` *(tenant, added 2026-09-20)*
+The tenant's own expressed interests (`{ "results": [ { id, unit_id, status, created_at, updated_at, ... } ] }`, newest first, unpaginated — a person's own list is small). Lets the public listing pages mark cards "Interested" after a reload and powers the tenant dashboard's "Homes you're interested in" list.
+
 ### `GET /landlords/me/interests?status=pending`
 Added 2026-09-18. Landlord inbox of tenants who expressed interest in any of their units —
 this is what the "add tenancy by the click of a button, for any interested tenant" flow reads
@@ -204,10 +246,15 @@ no manual "dismiss"/"convert" action on this resource itself.
 {
   "unit_id": "uuid", "tenant_id": "uuid",
   "start_date": "2026-09-01", "rent_amount": 150000, "currency": "XAF",
-  "billing_cycle": "monthly", "max_advance_months": 3,
+  "billing_cycle": "monthly", "max_advance_months": 3, "prepaid_months": 3,
   "reminder_first_days_before": 30, "reminder_second_days_before": 14
 }
 ```
+**`start_date`** is when **billing starts** — the tenancy's first rent falls due on that date, not on the day the tenancy was created. It may be today (the web UI's default), in the future (tenant moves in later: nothing is due until then) or in the past (backdated). Payments can't be made for any period before it (`422 PAYMENT_BEFORE_TENANCY_START`, see Section 7), and `next_payment_due_date` on the tenancy is the start date until something has been paid.
+
+**`prepaid_months`** *(optional, 1-24, added 2026-09-20)* — months of rent the tenant already paid the landlord outside the platform (typically cash upfront). It is recorded as a real **confirmed payment** with provider `offline`: an append-only ledger credit of `rent_amount × prepaid_months` (for a quarterly/biannual tenancy, `prepaid_months` must be a whole number of cycles — `422 PREPAID_MONTHS_INVALID_FOR_BILLING_CYCLE` otherwise), a receipt, and a `payment.confirmed` event, which advances `paid_through_date` and notifies the tenant exactly as a mobile-money payment would. It covers `start_date` through the last day of the Nth calendar month (the same calendar-month convention `POST /tenancies/{id}/payments` uses). The response already carries the updated `paid_through_date`. Validation happens **before** anything is created, so a bad value never leaves a half-created tenancy behind. Deliberately **not** limited by `max_advance_months` — that cap limits what a tenant may pay *through the platform*; a landlord recording cash they actually received is stating a fact, not requesting a permission (the tenant simply can't pay further ahead through the platform until they're back under the cap). `offline` is never accepted as a `provider` on `POST /tenancies/{id}/payments`, so a tenant can't mark their own rent as paid.
+
+**`prepaid_paid_on`** *(optional, `YYYY-MM-DD`, requires `prepaid_months`, added 2026-09-20)* — the day the tenant actually handed over that rent (e.g. move-in day), when that isn't the day the landlord is recording it. Defaults to now; a future date is rejected (`422 PREPAID_PAID_ON_INVALID`). It becomes the payment's confirmation date — the "Paid on …" that dashboards, the receipt and the tenant's notification show — while the ledger entry's own `created_at` still records when it was entered, so the audit trail stays honest.
 `notice_period_days` is **not** client-settable below the statutory floor — server applies the region-appropriate default and rejects any request attempting to override it downward (`422 NOTICE_PERIOD_BELOW_STATUTORY_MINIMUM`). `reminder_first_days_before`/`reminder_second_days_before` default to 30/14 ("1 month" / "2 weeks", per the product requirement) if omitted and are freely landlord-configurable — these drive the rent-expiry reminder scheduler described in the architecture doc.
 
 ### `PATCH /tenancies/{id}/reminder-settings` *(landlord)*
@@ -217,10 +264,10 @@ no manual "dismiss"/"convert" action on this resource itself.
 Adjusts reminder timing for an existing tenancy without needing to touch any other field.
 
 ### `GET /landlords/me/tenancies`
-Occupancy dashboard data source — includes `current_balance` (derived from the ledger, not stored redundantly on the tenancy record itself) **and** `paid_through_date`, which is what the dashboard uses to visually flag units approaching expiry (e.g., amber/red badge) independent of whether a reminder notification has fired yet. Also includes `months_paid_ahead` (added 2026-09-18) — a simple whole-calendar-month count of how far `paid_through_date` sits ahead of today, so the landlord can see at a glance how many months a tenant has paid for without doing the date math themselves.
+Occupancy dashboard data source — includes `current_balance` (derived from the ledger, not stored redundantly on the tenancy record itself) **and** `paid_through_date`, which is what the dashboard uses to visually flag units approaching expiry (e.g., amber/red badge) independent of whether a reminder notification has fired yet. Also includes `next_payment_due_date` (added 2026-09-20) — when the next rent payment is expected: the day after `paid_through_date`, or the tenancy's `start_date` until anything has been paid; `null` once the tenancy has terminated/expired (nothing further is owed). It is on every tenancy response (list and detail, landlord and tenant). Also includes `months_paid_ahead` (added 2026-09-18) — a simple whole-calendar-month count of how far `paid_through_date` sits ahead of today, so the landlord can see at a glance how many months a tenant has paid for without doing the date math themselves.
 
 ### `GET /tenants/me/tenancies` *(tenant)*
-Added 2026-09-18 after live demo feedback — the tenant-side mirror of `GET /landlords/me/tenancies` above (same response shape, scoped to the requester's own tenancies as tenant instead of as landlord). Closes the gap where a tenant previously had no way to discover their own tenancies except being told the id out-of-band.
+Added 2026-09-18 after live demo feedback — the tenant-side mirror of `GET /landlords/me/tenancies` above (same response shape, scoped to the requester's own tenancies as tenant instead of as landlord). Closes the gap where a tenant previously had no way to discover their own tenancies except being told the id out-of-band. Both list endpoints (this and the landlord's) also include `recent_ledger_entries` (last 5, same shape as `GET /tenancies/{id}`) so a dashboard can show payment history — including rent recorded as paid upfront — on first load.
 
 ### `GET /tenancies/{id}`
 Full detail including `paid_through_date`, reminder settings, linked contract status, and last 5 ledger entries (full ledger via `/tenancies/{id}/ledger`).
@@ -246,6 +293,7 @@ Requires `Idempotency-Key` header.
 **Server-side validation before contacting the aggregator** (this is where Epic 4's US-4.3 is enforced):
 - Reject `422 PAYMENT_BEYOND_NOTICE_EFFECTIVE_DATE` if `period_end` > the tenancy's active termination notice `effective_date`.
 - Reject `422 PAYMENT_EXCEEDS_ADVANCE_MONTHS_CAP` if this payment would cover more months ahead than `max_advance_months` allows.
+- Reject `422 PAYMENT_BEFORE_TENANCY_START` if `period_start` is before the tenancy's `start_date` (added 2026-09-20) — billing starts on the start date, which the landlord sets and which needn't be the day the tenancy was created.
 
 `202 Accepted` (payment status `pending` — actual confirmation is async via webhook/reconciliation):
 ```json
@@ -260,11 +308,16 @@ Verifies provider signature; `200` acknowledged regardless of business outcome (
 {
   "current_balance": 0,
   "entries": [
-    { "id": "uuid", "type": "credit", "amount": 150000, "running_balance": 0, "created_at": "...", "payment_id": "uuid" }
+    { "id": "uuid", "type": "credit", "amount": 150000, "running_balance": 150000, "description": "Rent payment for 2026-09-01 to 2026-09-30",
+      "provider": "campay", "created_at": "...", "payment_id": "uuid" }
   ],
   "next_cursor": null
 }
 ```
+
+Each entry also says *when it was paid and what it covers* *(added 2026-09-20)*: `paid_at` (when the payment was made/confirmed), `period_start`/`period_end` (the period covered) and `months_covered` (calendar months that period touches, inclusive — e.g. 2026-09-20 → 2026-11-30 is 3). The next payment is due the day after the latest `period_end`, i.e. the tenancy's `next_payment_due_date`. The same three facts — paid on, month(s) covered, next payment due — are stated, in the recipient's language, in the `payment.confirmed` notification and in the receipt document.
+
+`description` and `provider` *(added 2026-09-20)*: `provider` is `campay`, `monetbil`, or `offline` (rent the landlord recorded as paid upfront at tenancy creation — its description reads "Rent paid upfront (recorded by landlord) for …"), so a UI can label those entries without parsing text.
 
 ### `GET /payments/{id}/receipt`
 Returns a signed, time-limited download URL for the receipt PDF (object in Cloudflare R2).
