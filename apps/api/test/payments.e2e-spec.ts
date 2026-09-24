@@ -286,14 +286,17 @@ describe('Payments module (e2e)', () => {
     await request(app.getHttpServer())
       .post(`/v1/tenancies/${tenancyId}/termination-notices`)
       .set('Authorization', `Bearer ${landlord.access_token}`)
-      .send({ reason: 'end_of_term', effective_date: '2026-12-20' })
+      // Well beyond the 90-day statutory floor from "today", however far in
+      // the future this suite happens to run — a date close to that floor
+      // rots as real time passes (this one used to be 2026-12-20).
+      .send({ reason: 'end_of_term', effective_date: '2027-06-20' })
       .expect(201);
 
     const res = await request(app.getHttpServer())
       .post(`/v1/tenancies/${tenancyId}/payments`)
       .set('Authorization', `Bearer ${tenant.access_token}`)
       .set('Idempotency-Key', 'e2e-key-notice')
-      .send({ ...validPaymentBody, period_start: '2027-01-01', period_end: '2027-01-31' })
+      .send({ ...validPaymentBody, period_start: '2027-07-01', period_end: '2027-07-31' })
       .expect(422);
     expect(res.body.error.code).toBe('PAYMENT_BEYOND_NOTICE_EFFECTIVE_DATE');
   });

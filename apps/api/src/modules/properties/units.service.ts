@@ -120,6 +120,9 @@ export class UnitsService {
 
     const where = {
       status: query.status ?? UnitStatus.vacant,
+      // A unit under admin review is excluded from public listings entirely,
+      // regardless of status — that's the actual effect of flagging it.
+      flaggedAt: null,
       ...(query.bedrooms !== undefined ? { bedrooms: query.bedrooms } : {}),
       ...(query.min_bedrooms !== undefined ? { bedrooms: { gte: query.min_bedrooms } } : {}),
       ...(query.min_price !== undefined || query.max_price !== undefined
@@ -212,7 +215,7 @@ export class UnitsService {
         photos: { orderBy: { sortOrder: 'asc' } },
       },
     });
-    if (!unit || unit.status !== UnitStatus.vacant) {
+    if (!unit || unit.status !== UnitStatus.vacant || unit.flaggedAt !== null) {
       throw new NotFoundException('Unit not found');
     }
 
@@ -444,5 +447,94 @@ export class UnitsService {
       throw new NotFoundException('Unit not found');
     }
     return { label: unit.label, addressLine: unit.property.addressLine, city: unit.property.city };
+  }
+
+  // ---- Admin moderation (Admin module) ----
+  // Public interface for the Admin module — it never reads/writes Unit rows
+  // directly, per CLAUDE.md's cross-module rule. These are plain sequential
+  // writes rather than a `$transaction` with the caller's own audit-log
+  // insert (unlike updateUnit's edit+listing_changes pair above): the audit
+  // row lives in Admin's own table, not this module's, so wrapping both in
+  // one transaction would mean this module reaching into another module's
+  // table. The tiny window where the flag/unflag/remove succeeds but the
+  // admin_actions_log write fails is an acceptable, disclosed risk for a
+  // moderation action — nothing money- or ledger-adjacent, unlike payments.
+
+  async getUnitForModeration(unitId: string) {
+    const unit = await this.prisma.unit.findUnique({
+      where: { id: unitId },
+      include: { property: { select: { id: true, name: true, city: true, landlordId: true } } },
+    });
+    if (!unit) {
+      throw new NotFoundException('Unit not found');
+    }
+    return unit;
+  }
+
+  async flagUnit(unitId: string, adminId: string, reason: string) {
+    const unit = await this.getUnitForModeration(unitId);
+    const updated = await this.prisma.unit.update({
+      where: { id: unitId },
+      data: { flaggedAt: new Date(), flagReason: reason, flaggedBy: adminId },
+      include: { property: { select: { id: true, name: true, city: true, landlordId: true } } },
+    });
+    return { unit, updated };
+  }
+
+  // Dismissing a flag with no further action — the listing stays exactly as
+  // it was, just visible again.
+  async unflagUnit(unitId: string) {
+    const unit = await this.getUnitForModeration(unitId);
+    if (!unit.flaggedAt) {
+      return unit; // nothing to dismiss
+    }
+    return this.prisma.unit.update({
+      where: { id: unitId },
+      data: { flaggedAt: null, flagReason: null, flaggedBy: null },
+      include: { property: { select: { id: true, name: true, city: true, landlordId: true } } },
+    });
+  }
+
+  // Takes the listing down (back to `draft`, same "not publicly listed"
+  // state a brand-new unit starts in) and clears the flag — the queue item
+  // is resolved. Refuses to remove a unit someone is currently living in;
+  // that's a tenancy-termination decision, not a listing-moderation one.
+  async removeUnit(unitId: string, adminId: string) {
+    const unit = await this.getUnitForModeration(unitId);
+    if (this.inResidence(unit.status)) {
+      throw new ApiException(
+        'CANNOT_REMOVE_OCCUPIED_UNIT',
+        'A tenant is currently living in this unit — it cannot be removed as a listing.',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+    const updated = await this.prisma.unit.update({
+      where: { id: unitId },
+      data: { status: UnitStatus.draft, flaggedAt: null, flagReason: null, flaggedBy: null },
+      include: { property: { select: { id: true, name: true, city: true, landlordId: true } } },
+    });
+    if (unit.status !== UnitStatus.draft) {
+      this.events.emit(UNIT_STATUS_CHANGED, {
+        unitId,
+        previousStatus: unit.status,
+        newStatus: UnitStatus.draft,
+      } satisfies UnitStatusChangedEvent);
+    }
+    return { unit, updated, adminId };
+  }
+
+  async listFlaggedUnits() {
+    const units = await this.prisma.unit.findMany({
+      where: { flaggedAt: { not: null } },
+      include: { property: { select: { id: true, name: true, city: true, landlordId: true } } },
+      orderBy: { flaggedAt: 'desc' },
+    });
+    return units.map((unit) => ({
+      ...toUnitResponse(unit),
+      flagged_at: unit.flaggedAt,
+      flag_reason: unit.flagReason,
+      flagged_by: unit.flaggedBy,
+      landlord_id: unit.property.landlordId,
+    }));
   }
 }

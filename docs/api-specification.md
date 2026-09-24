@@ -406,12 +406,51 @@ Aggregate/filterable view (Epic 7, US-7.2).
 
 ## 11. Admin
 
-### `GET /admin/kyc-queue`
-### `GET /admin/listings/flagged`
-### `GET /admin/payments/disputes`
-### `GET /admin/audit-log?target_type=&target_id=&cursor=`
+All admin endpoints require `role = admin` (`403` otherwise). Built 2026-09-24 as its own module — see the deployment/module doc's B.9 for the `admin_actions_log` schema and the module's cross-module design.
 
-All admin endpoints require `role = admin`; every state-changing admin action writes to `admin_actions_log` per the schema in the deployment/module doc — this happens server-side automatically, not something the client needs to separately call.
+### `GET /admin/kyc-queue`
+Users who submitted an ID document (`POST /users/me/kyc-documents`) that no admin has reviewed yet — `id_document_url IS NOT NULL AND kyc_verified_at IS NULL`, oldest first.
+```json
+{ "results": [ { "id": "uuid", "full_name": "...", "phone_number": "...", "locale": "fr",
+  "id_document_type": "national_id", "id_document_ref": "...", "id_document_url": "local://kyc-documents/...",
+  "submitted_at": "2026-09-24T10:00:00Z" } ] }
+```
+Approving stays on the existing `POST /admin/users/{id}/kyc/approve` (Section 3) — this is only the queue view. **Not covered**: an ownership-verification queue for `properties.ownership_doc_url`. No upload endpoint for that document exists anywhere in this spec yet (it's an unused column — the property equivalent of the KYC queue is deferred until that's built), so `ownership_verified_at` stays an admin/seed-only field for now, same as before.
+
+### `GET /admin/listings/flagged`
+Units an admin has flagged for review, newest first. **Flagging is entirely admin-initiated** — there is no tenant/public "report this listing" flow in this MVP; an admin flags a unit themselves after spotting something (duplicate/fake photos, an implausible price, etc.), same "small internal team reviewing things by hand" framing as the PRD's Admin/Support persona.
+```json
+{ "results": [ { "id": "uuid", "label": "...", "rent_amount": "...", "status": "vacant", "...": "(the rest of the unit object)",
+  "flagged_at": "...", "flag_reason": "...", "flagged_by": "uuid",
+  "landlord_id": "uuid", "landlord": { "name": "...", "phone_number": "..." } } ] }
+```
+
+### `POST /admin/listings/{id}/flag`
+```json
+{ "reason": "Suspiciously low price for the area" }
+```
+Removes the unit from public search and its own public detail page (`GET /units`, `GET /units/{id}`) immediately, regardless of its `status` — the landlord's own view of it is unaffected. `reason` is required (3–300 chars).
+
+### `POST /admin/listings/{id}/unflag`
+Dismisses the flag with no other change — the unit reappears in public search if its status still makes it eligible. A no-op (still `200`, no audit row) if the unit isn't currently flagged.
+
+### `POST /admin/listings/{id}/remove`
+```json
+{ "reason": "Confirmed fake listing" }
+```
+Takes the listing down for good: forces `status` to `draft` (same as a unit that's never been listed) and resolves the flag, if any. `422` (`CANNOT_REMOVE_OCCUPIED_UNIT`) if a tenant currently lives there (`occupied`/`notice_given`) — that's a tenancy-termination decision, not a listing one. `reason` required.
+
+### `GET /admin/payments/disputes`
+Payments stuck as `failed` or `reconciling` — the subset actually needing manual review, narrower than the general `GET /admin/payments?status=` (Section 7). Same response shape as that endpoint.
+
+### `GET /admin/audit-log?target_type=&target_id=&cursor=&limit=`
+Every admin action, newest first, each with who did it.
+```json
+{ "results": [ { "id": "uuid", "admin_id": "uuid", "admin_profile": { "name": "...", "phone_number": "..." },
+  "action_type": "listing_flagged", "target_type": "unit", "target_id": "uuid",
+  "detail": { "reason": "..." }, "created_at": "..." } ], "next_cursor": null } }
+```
+`target_type` is `user` or `unit`. `action_type` is `kyc_approved` | `listing_flagged` | `listing_unflagged` | `listing_removed`. `kyc_approved` rows are written by an `@OnEvent` listener reacting to Auth's `user.kyc_tier_changed` (the approve endpoint itself lives in Auth, per Section 3) — every other action type is logged directly by this module's own endpoints above. Every state-changing admin action writes exactly one row here; this happens server-side automatically, not something the client needs to separately call.
 
 ---
 

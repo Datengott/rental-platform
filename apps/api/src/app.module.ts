@@ -13,9 +13,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { ContractsModule } from './modules/contracts/contracts.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { ComplaintsModule } from './modules/complaints/complaints.module';
-
-// Remaining feature module (admin) gets imported here as it's built,
-// following the order in CLAUDE.md.
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
@@ -32,7 +30,7 @@ import { ComplaintsModule } from './modules/complaints/complaints.module';
     ContractsModule,
     NotificationsModule,
     ComplaintsModule,
-    // AdminModule — add here
+    AdminModule,
   ],
   controllers: [AppController],
 })

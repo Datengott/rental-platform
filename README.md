@@ -373,7 +373,44 @@ tested; unchecked = not started or schema-only.
       - Visual polish: a small stats row on the landlord dashboard (unit/occupied/
         pending-visit/open-complaint counts), chip-style facility pickers, and tag/
         badge styling for the values above.
-- [ ] **Admin** — thin wrappers over other modules' APIs + audit log
+- [x] **Admin** (`apps/api/src/modules/admin/`, 2026-09-24) — mostly a thin
+      read/action layer over the other modules' own public services, plus its
+      own append-only `admin_actions_log` (migration `20260924072210_add_admin_module`).
+      Four areas, per api-specification.md Section 11:
+      - **KYC queue** (`GET /admin/kyc-queue`) — users who submitted an ID
+        document that no admin has reviewed yet. Approving stays on Auth's
+        existing `POST /admin/users/{id}/kyc/approve`; that action logs itself
+        into `admin_actions_log` via an `@OnEvent` listener on Auth's own
+        `user.kyc_tier_changed` event, rather than Auth calling into Admin
+        directly — keeps the module dependency one-directional. **Not
+        built**: an ownership-verification queue for `properties.ownership_doc_url` —
+        there's still no landlord-facing upload endpoint for that document
+        anywhere in the spec (same "dead schema, no writer" situation flagged
+        elsewhere in this file), so `ownership_verified_at` stays admin/seed-only.
+      - **Listing moderation** (`GET /admin/listings/flagged`, `POST .../flag`,
+        `.../unflag`, `.../remove`) — three new columns on `units`
+        (`flagged_at`/`flag_reason`/`flagged_by`), not landlord-editable. A
+        flagged unit disappears from public search/detail immediately,
+        regardless of status. **Flagging is entirely admin-initiated** —
+        there's no tenant-facing "report this listing" flow in this MVP, so
+        an admin flags a unit themselves after spotting something (this was a
+        real design decision worth flagging: the PRD only says "listing
+        moderation," it doesn't say who raises the flag). `remove` forces the
+        unit back to `draft` and refuses if a tenant is currently living there
+        (`422 CANNOT_REMOVE_OCCUPIED_UNIT`) — that's a tenancy-termination
+        decision, not a listing one.
+      - **Payment disputes** (`GET /admin/payments/disputes`) — a narrower,
+        spec-named sibling of Payments' own already-built `GET /admin/payments?status=`:
+        specifically payments stuck `failed` or `reconciling`, not every payment.
+      - **Audit log** (`GET /admin/audit-log?target_type=&target_id=&cursor=`) —
+        every row above, with who did it (`admin_profile`), cursor-paginated
+        the same way the listing-changes log already was.
+      Not transactional across modules: the listing-moderation endpoints call
+      `UnitsService`'s methods, then log to `admin_actions_log` as a second,
+      separate write (the log table and `units` belong to different modules,
+      so one `$transaction` can't span both without one module reaching into
+      the other's table) — a disclosed, low-risk gap for a moderation action,
+      unlike the ledger/listing-changes transactions elsewhere in this repo.
 
 Right now the repo has: a bootable NestJS API shell with a `/health` endpoint, a
 worker process that verifies its DB/Redis connections on startup (plus a real 15-minute

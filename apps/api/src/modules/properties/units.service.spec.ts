@@ -300,4 +300,97 @@ describe('UnitsService', () => {
       expect(listingChanges.buildRecord).not.toHaveBeenCalled();
     });
   });
+
+  describe('admin moderation', () => {
+    it('flagUnit records the flag on the unit', async () => {
+      prisma.unit.findUnique.mockResolvedValue(unitRow());
+      prisma.unit.update.mockResolvedValue(unitRow({ flaggedAt: new Date(), flagReason: 'Suspicious price', flaggedBy: 'admin-1' }));
+
+      const { updated } = await service.flagUnit('unit-1', 'admin-1', 'Suspicious price');
+
+      const call = (prisma.unit.update.mock.calls[0] as [{ where: { id: string }; data: { flagReason: string; flaggedBy: string } }])[0];
+      expect(call.where).toEqual({ id: 'unit-1' });
+      expect(call.data.flagReason).toBe('Suspicious price');
+      expect(call.data.flaggedBy).toBe('admin-1');
+      expect(updated.flagReason).toBe('Suspicious price');
+    });
+
+    it('unflagUnit clears the flag when one exists', async () => {
+      prisma.unit.findUnique.mockResolvedValue(unitRow({ flaggedAt: new Date(), flagReason: 'x', flaggedBy: 'admin-1' }));
+      prisma.unit.update.mockResolvedValue(unitRow({ flaggedAt: null, flagReason: null, flaggedBy: null }));
+
+      const result = await service.unflagUnit('unit-1');
+
+      const call = (prisma.unit.update.mock.calls[0] as [{ where: { id: string }; data: unknown }])[0];
+      expect(call.where).toEqual({ id: 'unit-1' });
+      expect(call.data).toEqual({ flaggedAt: null, flagReason: null, flaggedBy: null });
+      expect(result.flaggedAt).toBeNull();
+    });
+
+    it('unflagUnit is a no-op when the unit is not flagged', async () => {
+      prisma.unit.findUnique.mockResolvedValue(unitRow({ flaggedAt: null }));
+
+      await service.unflagUnit('unit-1');
+
+      expect(prisma.unit.update).not.toHaveBeenCalled();
+    });
+
+    it('removeUnit sends a vacant unit to draft and clears any flag', async () => {
+      prisma.unit.findUnique.mockResolvedValue(unitRow({ status: 'vacant', flaggedAt: new Date(), flagReason: 'x' }));
+      prisma.unit.update.mockResolvedValue(unitRow({ status: 'draft', flaggedAt: null, flagReason: null, flaggedBy: null }));
+
+      const { updated } = await service.removeUnit('unit-1', 'admin-1');
+
+      const call = (prisma.unit.update.mock.calls[0] as [{ where: { id: string }; data: unknown }])[0];
+      expect(call.where).toEqual({ id: 'unit-1' });
+      expect(call.data).toEqual({ status: 'draft', flaggedAt: null, flagReason: null, flaggedBy: null });
+      expect(updated.status).toBe('draft');
+      expect(events.emit).toHaveBeenCalledWith(
+        'unit.status_changed',
+        expect.objectContaining({ previousStatus: 'vacant', newStatus: 'draft' }),
+      );
+    });
+
+    it('removeUnit refuses to remove a unit a tenant is currently living in', async () => {
+      for (const status of ['occupied', 'notice_given']) {
+        prisma.unit.update.mockClear();
+        prisma.unit.findUnique.mockResolvedValue(unitRow({ status }));
+
+        await expect(service.removeUnit('unit-1', 'admin-1')).rejects.toMatchObject({
+          response: { code: 'CANNOT_REMOVE_OCCUPIED_UNIT' },
+        });
+        expect(prisma.unit.update).not.toHaveBeenCalled();
+      }
+    });
+
+    it('listFlaggedUnits returns currently-flagged units with the landlord id', async () => {
+      prisma.unit.findMany.mockResolvedValue([
+        unitRow({ flaggedAt: new Date(), flagReason: 'Suspicious price', flaggedBy: 'admin-1' }),
+      ]);
+
+      const result = await service.listFlaggedUnits();
+
+      expect(result).toEqual([
+        expect.objectContaining({ flag_reason: 'Suspicious price', flagged_by: 'admin-1', landlord_id: 'user-1' }),
+      ]);
+    });
+  });
+
+  describe('public visibility', () => {
+    it('excludes flagged units from search regardless of status', async () => {
+      prisma.unit.findMany.mockResolvedValue([]);
+      prisma.unit.count.mockResolvedValue(0);
+
+      await service.searchUnits({});
+
+      const call = (prisma.unit.findMany.mock.calls[0] as [{ where: { flaggedAt: unknown } }])[0];
+      expect(call.where.flaggedAt).toBeNull();
+    });
+
+    it('404s the public detail view for a flagged unit even if it is vacant', async () => {
+      prisma.unit.findUnique.mockResolvedValue(unitRow({ flaggedAt: new Date(), photos: [] }));
+
+      await expect(service.getPublicUnit('unit-1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
 });

@@ -417,4 +417,16 @@ describe('PaymentsService', () => {
       await expect(service.getCurrentBalance('tenancy-1')).resolves.toBe(300000);
     });
   });
+
+  describe('listDisputes', () => {
+    it('queries only failed and reconciling payments — not pending or confirmed', async () => {
+      prisma.payment.findMany.mockResolvedValue([]);
+
+      await service.listDisputes();
+
+      expect(prisma.payment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: { in: ['failed', 'reconciling'] } } }),
+      );
+    });
+  });
 });

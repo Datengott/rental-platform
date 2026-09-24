@@ -694,27 +694,43 @@ CREATE TABLE complaint_updates (
 
 ### B.9 Admin / Ops Module
 
-Mostly a read/action layer over other modules rather than owning much independent data — but does own:
+Built 2026-09-24. Mostly a read/action layer over other modules rather than owning much independent data — but does own:
 
 ```sql
 CREATE TABLE admin_actions_log (
-    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    admin_id                 UUID NOT NULL,
-    action_type                VARCHAR(50) NOT NULL,        -- 'kyc_approved' | 'listing_removed' | 'payment_reviewed' | ...
-    target_type                  VARCHAR(30) NOT NULL,       -- 'user' | 'property' | 'payment' | ...
-    target_id                      UUID NOT NULL,
-    detail                            JSONB,
-    created_at                          TIMESTAMPTZ NOT NULL DEFAULT now()
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admin_id    UUID NOT NULL,               -- references users.id — no FK: an audit row outlives account changes
+    action_type VARCHAR(50) NOT NULL,        -- 'kyc_approved' | 'listing_flagged' | 'listing_unflagged' | 'listing_removed'
+    target_type VARCHAR(30) NOT NULL,        -- 'user' | 'unit'
+    target_id   UUID NOT NULL,
+    detail      JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_admin_actions_target ON admin_actions_log(target_type, target_id, created_at);
+CREATE INDEX idx_admin_actions_admin ON admin_actions_log(admin_id, created_at);
+CREATE INDEX idx_admin_actions_created ON admin_actions_log(created_at);
 ```
 
-Every admin action that touches another module's data goes through that module's own API (e.g., KYC approval calls the Auth module's endpoint) — this log is purely an audit trail, not a bypass mechanism, keeping the module data-ownership rule intact even for privileged operations.
+Every admin action that touches another module's data goes through that module's own API (e.g., KYC approval calls the Auth module's endpoint) — this log is purely an audit trail, not a bypass mechanism, keeping the module data-ownership rule intact even for privileged operations. Two ways a row gets written, both ending up here: (1) this module's own endpoints (listing flag/unflag/remove) call `UnitsService`'s public methods, then log directly, in that order — not a single transaction, since the log table and the units table belong to different modules (see the disclosed risk note in `admin.service.ts`); (2) an existing action on *another* module's own endpoint (Auth's `POST /admin/users/{id}/kyc/approve`) is observed via an `@OnEvent` listener on `user.kyc_tier_changed` instead of Auth calling into Admin directly — keeps the dependency one-directional (Admin → Auth/Properties/Payments, never back), so no `forwardRef` is needed here unlike Tenancies↔Payments/Contracts.
+
+Listing moderation reuses B.2's `units` table rather than a table of its own — three added columns (`flagged_at`, `flag_reason`, `flagged_by`), landlord-invisible-by-design (not on `PATCH /units/{id}`'s DTO) and cleared again on unflag/remove:
+```sql
+ALTER TABLE units
+    ADD COLUMN flagged_at  TIMESTAMPTZ,
+    ADD COLUMN flag_reason TEXT,
+    ADD COLUMN flagged_by  UUID;          -- references users.id, the admin who flagged it
+CREATE INDEX idx_units_flagged ON units(flagged_at);
+```
+A flagged unit is excluded from `GET /units` and `GET /units/{id}` regardless of `status` — that's the actual effect of flagging, not just a queue entry. There is no tenant/public "report a listing" flow feeding this queue in this MVP; flags are entirely admin-initiated (see api-specification.md Section 11).
 
 **Key endpoints**
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/admin/kyc-queue` | Pending verification requests |
 | GET | `/admin/listings/flagged` | Moderation queue |
+| POST | `/admin/listings/{id}/flag` | Flag a unit (removes it from public listings) |
+| POST | `/admin/listings/{id}/unflag` | Dismiss a flag |
+| POST | `/admin/listings/{id}/remove` | Take a listing down for good (back to `draft`) |
 | GET | `/admin/payments/disputes` | Payments needing manual review |
 | GET | `/admin/audit-log` | Full admin action history |
 

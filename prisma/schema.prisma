@@ -167,6 +167,15 @@ model Unit {
   billingCycle BillingCycle @default(monthly) @map("billing_cycle")
   status       UnitStatus   @default(draft)
   description  String?
+  // Current moderation state (added 2026-09-24, Admin module) — set only by
+  // an admin action, never by the landlord (not on UpdateUnitDto). While
+  // flagged, the unit is excluded from public search/detail regardless of
+  // `status`. Non-null values pair with `admin_actions_log` rows recording
+  // the same action for durable history; these columns are just "is this
+  // currently flagged", not the audit trail itself.
+  flaggedAt    DateTime?    @map("flagged_at")
+  flagReason   String?      @map("flag_reason")
+  flaggedBy    String?      @map("flagged_by") // references users.id — not a Prisma relation, per CLAUDE.md
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 
@@ -175,6 +184,7 @@ model Unit {
 
   @@index([status])
   @@index([propertyId])
+  @@index([flaggedAt])
   @@map("units")
 }
 
@@ -685,6 +695,33 @@ model ComplaintUpdate {
   complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
 
   @@map("complaint_updates")
+}
+
+// ============================================================
+// B.9 — Admin / Ops Module
+// ============================================================
+
+// The only table Admin owns outright (per the schema doc's B.9: "mostly a
+// read/action layer over other modules"). Every state-changing admin action
+// writes one row here — either directly (the Admin module's own endpoints,
+// e.g. flagging/removing a listing) or via an @OnEvent listener reacting to
+// an action another module's own endpoint triggered (e.g. Auth's existing
+// POST /admin/users/{id}/kyc/approve, via user.kyc_tier_changed) — so this
+// stays a pure audit trail, never a bypass around another module's own API,
+// per CLAUDE.md's cross-module rule.
+model AdminActionLog {
+  id         String   @id @default(uuid())
+  adminId    String   @map("admin_id") // references users.id — not a Prisma relation
+  actionType String   @map("action_type") // 'kyc_approved' | 'listing_flagged' | 'listing_unflagged' | 'listing_removed'
+  targetType String   @map("target_type") // 'user' | 'unit'
+  targetId   String   @map("target_id")
+  detail     Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([targetType, targetId, createdAt])
+  @@index([adminId, createdAt])
+  @@index([createdAt])
+  @@map("admin_actions_log")
 }
 
 // ============================================================

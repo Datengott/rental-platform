@@ -320,6 +320,21 @@ export class PaymentsService {
     return payments.map((p) => this.toPaymentResponse(p));
   }
 
+  // Public interface for the Admin module's payments/disputes view (never a
+  // direct Prisma read of Payments' own tables, per CLAUDE.md's cross-module
+  // rule). "Needs manual review" = stuck outside the two healthy end states
+  // (confirmed, or pending-and-still-within-the-reconciliation-window):
+  // `failed` (the aggregator rejected it) or `reconciling` (the 15s sweep in
+  // reconcilePendingPayments() above already tried once and it's still not
+  // resolved) — a `pending` payment younger than that isn't a dispute yet.
+  async listDisputes() {
+    const payments = await this.prisma.payment.findMany({
+      where: { status: { in: [PaymentStatus.failed, PaymentStatus.reconciling] } },
+      orderBy: { initiatedAt: 'desc' },
+    });
+    return payments.map((p) => this.toPaymentResponse(p));
+  }
+
   // Safety net for AC3 (PRD Epic 5 US-5.1): if the simulated webhook's
   // self-call never lands, a payment must not stay stuck forever. Runs
   // in-process so it shares the event bus Tenancies' paid_through_date
